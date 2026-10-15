@@ -1013,10 +1013,25 @@ fn print_set_setting_error(service: &str, parameter: &str) {
 }
 
 fn print_set_setting_failure(service: &str, parameter: &str, values: &[String]) {
-    if parameter.eq_ignore_ascii_case("AppPriority") && priority_value(&values.join(" ")).is_err() {
+    let value = values.join(" ");
+    if parameter.eq_ignore_ascii_case("AppAffinity") && normalize_cpu_affinity(&value).is_err() {
+        let (mut process_mask, mut system_mask) = (0usize, 0usize);
+        let maximum_cpu = if unsafe {
+            GetProcessAffinityMask(GetCurrentProcess(), &mut process_mask, &mut system_mask)
+        } != 0
+            && system_mask != 0
+        {
+            usize::BITS - 1 - system_mask.leading_zeros()
+        } else {
+            usize::BITS - 1
+        };
+        cli_eprintln!("Affinity specification \"{value}\" is invalid.\r\r");
+        cli_eprintln!("Valid specifications are of the form \"0-2,4-6,10,15\"\r\r");
+        cli_eprintln!("Identifiers must be in the range 0-{maximum_cpu} on this system.\r\r");
+    } else if parameter.eq_ignore_ascii_case("AppPriority") && priority_value(&value).is_err() {
         cli_eprintln!(
             "Invalid process priority \"{}\".  Valid priorities are:\r\r",
-            values.join(" ")
+            value
         );
         for priority in [
             "REALTIME_PRIORITY_CLASS",
