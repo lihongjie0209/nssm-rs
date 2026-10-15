@@ -5766,7 +5766,7 @@ mod tests {
         let set_before = latest_event_record(&powershell, set_event);
         let service = "NssmRsAffinityApiFailureTest";
 
-        configure_child_affinity(service, super::INVALID_HANDLE_VALUE, Some("0"));
+        configure_child_affinity(service, std::ptr::null_mut(), Some("0"));
 
         wait_for_event(&powershell, get_event, get_before, service);
         wait_for_event(&powershell, set_event, set_before, service);
