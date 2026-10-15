@@ -423,6 +423,12 @@ fn decode_multi_string(data: &[u8]) -> Result<Vec<String>, String> {
     Ok(result)
 }
 
+fn format_cli_multi_string(values: &[String]) -> String {
+    // NSSM builds CRLF-separated REG_MULTI_SZ text, then writes it through the
+    // Windows text-mode CRT, which translates the trailing LF to CRLF.
+    values.join("\r\r\n")
+}
+
 fn encode_multi_string(values: &[String]) -> Vec<u8> {
     let mut wide_values = Vec::new();
     for value in values {
@@ -638,7 +644,7 @@ fn get_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), S
                     })
                     .unwrap_or_default()
             } else {
-                values.join("\r\n")
+                format_cli_multi_string(&values)
             }
         }
         SettingKind::Dword => {
@@ -955,7 +961,7 @@ fn get_native_setting(service: &str, parameter: &str, extra: &[String]) -> Resul
                     })
                     .unwrap_or_default()
             } else {
-                values.join("\r\n")
+                format_cli_multi_string(&values)
             };
             println!("{display}\r");
             Ok(())
@@ -977,7 +983,7 @@ fn get_native_setting(service: &str, parameter: &str, extra: &[String]) -> Resul
                         .into_iter()
                         .filter(|item| item.starts_with("+") == groups)
                         .collect::<Vec<_>>();
-                    selected.join("\r\n")
+                    format_cli_multi_string(&selected)
                 }
                 "description" => service_description(handle.0)?,
                 "displayname" => wide_pointer(config.lpDisplayName),

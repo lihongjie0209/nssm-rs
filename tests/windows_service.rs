@@ -223,6 +223,7 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
             .success()
     );
     let dependency = cli(&["get", &service, "DependOnService"]);
+    assert_eq!(dependency.stdout, b"RpcSs\r\r\nLanmanWorkstation\r\n");
     assert_eq!(
         String::from_utf8_lossy(&dependency.stdout).lines().count(),
         2
