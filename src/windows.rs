@@ -22,8 +22,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, ERROR_NO_MORE_ITEMS, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, NO_ERROR,
-        WPARAM,
+        CloseHandle, ERROR_NO_MORE_ITEMS, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM,
+        NO_ERROR, WPARAM,
     },
     System::Console::{
         AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
@@ -36,6 +36,7 @@ use windows_sys::Win32::{
         JobObjects::*,
         Registry::*,
         Services::*,
+        SystemInformation::GetSystemTimeAsFileTime,
         Threading::*,
     },
     UI::Shell::{IsUserAnAdmin, SHELLEXECUTEINFOW, ShellExecuteExW},
@@ -2054,10 +2055,30 @@ struct ProcessEntry {
     pid: u32,
 }
 
-fn process_image(pid: u32) -> io::Result<String> {
+struct ProcessImage {
+    path: String,
+    creation_time: u64,
+}
+
+fn filetime_value(time: FILETIME) -> u64 {
+    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+}
+
+fn process_image(pid: u32) -> io::Result<ProcessImage> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
     if process.is_null() {
         return Err(io::Error::last_os_error());
+    }
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            CloseHandle(process);
+        }
+        return Err(error);
     }
     let mut path = vec![0u16; 32768];
     let mut size = path.len() as u32;
@@ -2067,11 +2088,23 @@ fn process_image(pid: u32) -> io::Result<String> {
     unsafe {
         CloseHandle(process);
     }
-    if ok == 0 {
-        Ok("???".to_owned())
+    let path = if ok == 0 {
+        "???".to_owned()
     } else {
-        Ok(String::from_utf16_lossy(&path[..size as usize]))
-    }
+        String::from_utf16_lossy(&path[..size as usize])
+    };
+    Ok(ProcessImage {
+        path,
+        creation_time: filetime_value(creation),
+    })
+}
+
+fn process_belongs_to_service_lifetime(
+    root_created: u64,
+    root_exited: u64,
+    child_created: u64,
+) -> bool {
+    root_created <= child_created && child_created <= root_exited
 }
 
 fn process_tree(service: &str) -> Result<(), String> {
@@ -2101,6 +2134,9 @@ fn process_tree(service: &str) -> Result<(), String> {
             return Ok(());
         }
     };
+    let mut service_exit_time = FILETIME::default();
+    unsafe { GetSystemTimeAsFileTime(&mut service_exit_time) };
+    let service_lifetime = (root_image.creation_time, filetime_value(service_exit_time));
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
         return Err(io::Error::last_os_error().to_string());
@@ -2124,7 +2160,8 @@ fn process_tree(service: &str) -> Result<(), String> {
     fn visit(
         pid: u32,
         depth: usize,
-        root_image: Option<&str>,
+        root_image: Option<&ProcessImage>,
+        service_lifetime: (u64, u64),
         tree: &HashMap<u32, Vec<ProcessEntry>>,
         seen: &mut HashSet<u32>,
     ) {
@@ -2132,20 +2169,36 @@ fn process_tree(service: &str) -> Result<(), String> {
             return;
         }
         let image = if depth == 0 {
-            root_image.map(str::to_owned)
+            root_image.map(|image| ProcessImage {
+                path: image.path.clone(),
+                creation_time: image.creation_time,
+            })
         } else {
             process_image(pid).ok()
         };
-        if let Some(image) = image {
-            println!("{pid:>8} {}{image}\r", " ".repeat(depth));
+        let Some(image) = image else { return };
+        if !process_belongs_to_service_lifetime(
+            service_lifetime.0,
+            service_lifetime.1,
+            image.creation_time,
+        ) {
+            return;
         }
+        println!("{pid:>8} {}{}\r", " ".repeat(depth), image.path);
         if let Some(children) = tree.get(&pid) {
             for child in children {
-                visit(child.pid, depth + 1, None, tree, seen);
+                visit(child.pid, depth + 1, None, service_lifetime, tree, seen);
             }
         }
     }
-    visit(root, 0, Some(&root_image), &processes, &mut HashSet::new());
+    visit(
+        root,
+        0,
+        Some(&root_image),
+        service_lifetime,
+        &processes,
+        &mut HashSet::new(),
+    );
     Ok(())
 }
 
@@ -4167,7 +4220,7 @@ mod tests {
         EVENT_SERVICE_CONTROL_UNKNOWN, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
         PowerHookAction, SERVICE_CONTROL_PAUSE, elevation_arguments, elevation_parameters,
         hook_deadline_ms, parse_u32, power_hook_action, priority_name, priority_value,
-        queue_power_hook, service_control_event, valid_hook,
+        process_belongs_to_service_lifetime, queue_power_hook, service_control_event, valid_hook,
     };
 
     #[test]
@@ -4201,6 +4254,15 @@ mod tests {
         assert_eq!(remove_arguments, ["remove", "worker service", "confirm"]);
 
         assert!(elevation_arguments(&Command::List { all: false }).is_none());
+    }
+
+    #[test]
+    fn process_tree_excludes_pids_reused_outside_service_lifetime() {
+        assert!(process_belongs_to_service_lifetime(100, 200, 100));
+        assert!(process_belongs_to_service_lifetime(100, 200, 150));
+        assert!(process_belongs_to_service_lifetime(100, 200, 200));
+        assert!(!process_belongs_to_service_lifetime(100, 200, 99));
+        assert!(!process_belongs_to_service_lifetime(100, 200, 201));
     }
 
     #[test]

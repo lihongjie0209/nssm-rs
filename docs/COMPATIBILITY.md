@@ -108,6 +108,8 @@ Command parsing, managed settings, AppEnvironment/AppEnvironmentExtra compositio
 AppExit rules, priority/affinity, restart delay/throttle, SCM lifecycle, install,
 remove, service listing, process launch with configured stdin/stdout/stderr files,
 job-based process-tree termination and process-tree reporting are present. Native
+process reporting checks that descendant PIDs were created during the service
+process lifetime to avoid including unrelated processes after PID reuse.
 metadata support now includes Description, DisplayName, ImagePath, ObjectName,
 Start, Type, service Environment and service/group dependency lists. Direct
 stdin/stdout/stderr file redirection, staged console/window/thread shutdown,
