@@ -2001,10 +2001,11 @@ fn dump_managed_settings(executable: &str, source: &str, target: &str) -> Result
                 // NSSM's dump command serializes only the default AppExit
                 // action, even when code-specific actions are configured.
                 // The unnamed registry value is not returned by RegEnumValue.
-                if let Some((_, bytes)) = read_raw_value(key.0, None)? {
-                    let value = decode_wide(&bytes)?;
-                    dump_set_line(executable, target, spec.name, Some("Default"), &value);
-                }
+                let value = read_raw_value(key.0, None)?
+                    .map(|(_, bytes)| decode_wide(&bytes))
+                    .transpose()?
+                    .unwrap_or_else(|| "Restart".to_owned());
+                dump_set_line(executable, target, spec.name, Some("Default"), &value);
             }
             SettingKind::Hook => {
                 let Some(root) = open_registry_key_optional(
