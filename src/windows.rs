@@ -587,13 +587,13 @@ fn get_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), S
             ExitAction::Exit => "Exit",
             ExitAction::Suicide => "Suicide",
         };
-        println!("{display}");
+        println!("{display}\r");
         return Ok(());
     }
     if spec.kind == SettingKind::Hook {
         let hook =
             additional.ok_or_else(|| "AppEvents requires an event/action pair".to_owned())?;
-        println!("{}", read_hook(service, hook)?.unwrap_or_default());
+        println!("{}\r", read_hook(service, hook)?.unwrap_or_default());
         return Ok(());
     }
     let (key, value_name) = setting_location(service, spec, additional, false)?;
@@ -676,7 +676,7 @@ fn get_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), S
             }
         }
     };
-    println!("{display}");
+    println!("{display}\r");
     Ok(())
 }
 
@@ -957,11 +957,11 @@ fn get_native_setting(service: &str, parameter: &str, extra: &[String]) -> Resul
             } else {
                 values.join("\r\n")
             };
-            println!("{display}");
+            println!("{display}\r");
             Ok(())
         }
         "name" => {
-            println!("{service}");
+            println!("{service}\r");
             Ok(())
         }
         "dependongroup" | "dependonservice" | "description" | "displayname" | "imagepath"
@@ -1025,7 +1025,7 @@ fn get_native_setting(service: &str, parameter: &str, extra: &[String]) -> Resul
                 },
                 _ => unreachable!(),
             };
-            println!("{value}");
+            println!("{value}\r");
             Ok(())
         }
         _ => Err(format!("unsupported setting: {parameter}")),
@@ -1332,7 +1332,7 @@ fn dump_set_line_values(
         arguments.push(quote_windows_arg(additional));
     }
     arguments.extend(values.iter().map(|value| quote_windows_arg(value)));
-    println!("{}", arguments.join(" "));
+    println!("{}\r", arguments.join(" "));
 }
 
 fn registry_names(key: HKEY, subkeys: bool) -> Result<Vec<String>, String> {
@@ -1611,7 +1611,7 @@ fn dump_service(source: &str, target: Option<&str>) -> Result<(), String> {
         quote_windows_arg(target),
         quote_windows_arg(&application),
     ];
-    println!("{}", install.join(" "));
+    println!("{}\r", install.join(" "));
     dump_managed_settings(&executable, source, target)?;
     dump_native_settings(&executable, source, target)
 }
@@ -1964,7 +1964,7 @@ fn list_services(include_native: bool) -> Result<(), String> {
                 .flatten()
                 .is_some();
             if include_native || managed {
-                println!("{name}");
+                println!("{name}\r");
             }
         }
         if ok != 0 {
@@ -2063,7 +2063,11 @@ fn process_tree(service: &str) -> Result<(), String> {
         if !seen.insert(pid) {
             return;
         }
-        println!("{pid:>8} {}{}", " ".repeat(depth), process_image(pid, name));
+        println!(
+            "{pid:>8} {}{}\r",
+            " ".repeat(depth),
+            process_image(pid, name)
+        );
         if let Some(children) = tree.get(&pid) {
             for child in children {
                 visit(child.pid, depth + 1, &child.name, tree, seen);
@@ -2190,7 +2194,7 @@ fn install(name: &str, application: Option<&str>, args: &[String]) -> Result<(),
         }
         return Err(error);
     }
-    println!("Installed service '{name}'.");
+    println!("Installed service '{name}'.\r");
     Ok(())
 }
 
@@ -3722,18 +3726,18 @@ fn status_code(name: &str) -> Result<u8, String> {
     let handle = match open_service(name, SERVICE_QUERY_STATUS) {
         Ok(handle) => handle,
         Err(error) => {
-            eprintln!("{name}: {error}");
+            eprintln!("{name}: {error}\r");
             return Ok(0);
         }
     };
     let current_state = match state(handle.0) {
         Ok(current_state) => current_state,
         Err(error) => {
-            eprintln!("{name}: {error}");
+            eprintln!("{name}: {error}\r");
             return Ok(0);
         }
     };
-    println!("{}", state_name(current_state));
+    println!("{}\r", state_name(current_state));
     Ok(current_state.min(u8::MAX as u32) as u8)
 }
 
@@ -3750,7 +3754,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
             }
             if let Err(error) = open_service(&service, SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG)
             {
-                eprintln!("nssm-r: {error}");
+                eprintln!("nssm-r: {error}\r");
                 return Ok(3);
             }
             if read_optional_reg_string(&service, "Application")
@@ -3758,13 +3762,13 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 .flatten()
                 .is_none()
             {
-                eprintln!("nssm-r: AppAffinity is only valid for nssm-r services");
+                eprintln!("nssm-r: AppAffinity is only valid for nssm-r services\r");
                 return Ok(1);
             }
             match set_setting(&service, &parameter, &values) {
                 Ok(()) => Ok(0),
                 Err(error) => {
-                    eprintln!("nssm-r: {error}");
+                    eprintln!("nssm-r: {error}\r");
                     Ok(6)
                 }
             }
@@ -3792,7 +3796,7 @@ fn execute_service_command(command: Command) -> Result<(), String> {
         }
         Command::Status(name) => {
             let s = state(open_service(&name, SERVICE_QUERY_STATUS)?.0)?;
-            println!("{}", state_name(s));
+            println!("{}\r", state_name(s));
             Ok(())
         }
         Command::StatusCode(name) => status_code(&name).map(|_| ()),

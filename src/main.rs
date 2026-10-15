@@ -6,10 +6,16 @@ const USAGE: &str = "nssm-r: Windows service wrapper\n\nUsage: nssm-r <command> 
 fn run(args: &[String]) -> Result<u8, String> {
     match parse_args(args).map_err(|e| e.to_string())? {
         Command::Help => {
+            #[cfg(windows)]
+            print!("{}", USAGE.replace('\n', "\r\n"));
+            #[cfg(not(windows))]
             print!("{USAGE}");
             Ok(0)
         }
         Command::Version => {
+            #[cfg(windows)]
+            println!("nssm-r {VERSION}\r");
+            #[cfg(not(windows))]
             println!("nssm-r {VERSION}");
             Ok(0)
         }
@@ -35,7 +41,7 @@ fn main() -> ExitCode {
             return match args.get(1).map(|s| crate::windows::run_service(s)) {
                 Some(Ok(())) => ExitCode::SUCCESS,
                 Some(Err(error)) => {
-                    eprintln!("nssm-r service host: {error}");
+                    eprintln!("nssm-r service host: {error}\r");
                     ExitCode::FAILURE
                 }
                 None => ExitCode::FAILURE,
@@ -49,6 +55,9 @@ fn main() -> ExitCode {
     match run(&args) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
+            #[cfg(windows)]
+            eprintln!("nssm-r: {e}\r");
+            #[cfg(not(windows))]
             eprintln!("nssm-r: {e}");
             ExitCode::FAILURE
         }

@@ -175,6 +175,7 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     );
     let description = cli(&["get", &service, "Description"]);
     assert!(description.status.success());
+    assert!(description.stdout.ends_with(b"\r\n"));
     assert_eq!(
         String::from_utf8_lossy(&description.stdout).trim(),
         "nssm-r test service"
