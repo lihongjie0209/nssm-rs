@@ -9,9 +9,17 @@ fn run(args: &[&str]) -> std::process::Output {
 
 #[test]
 fn help_and_version_are_successful_commands_with_output() {
-    let help = run(&["--help"]);
-    assert!(help.status.success());
-    assert!(!help.stdout.is_empty());
+    let canonical_help = run(&["help"]);
+    assert_eq!(canonical_help.status.code(), Some(0));
+    assert!(!canonical_help.stdout.is_empty());
+    assert!(canonical_help.stderr.is_empty());
+
+    for spelling in ["HELP", "-h", "--help"] {
+        let help = run(&[spelling]);
+        assert_eq!(help.status.code(), Some(0), "{spelling}");
+        assert_eq!(help.stdout, canonical_help.stdout, "{spelling}");
+        assert_eq!(help.stderr, canonical_help.stderr, "{spelling}");
+    }
 
     let version = run(&["version"]);
     assert!(version.status.success());
