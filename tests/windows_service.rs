@@ -1135,6 +1135,80 @@ fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
 }
 
 #[test]
+fn ignore_and_exit_actions_have_distinct_service_lifecycles() {
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    for (action, expected_state) in [("Ignore", "SERVICE_RUNNING"), ("Exit", "SERVICE_STOPPED")] {
+        let service = unique_service_name();
+        let _cleanup = Cleanup(service.clone());
+        let exit_path = std::env::temp_dir().join(format!("{service}_exit_action.txt"));
+        let exit_path = exit_path.to_string_lossy().into_owned();
+        let _files = FileCleanup(vec![exit_path.clone()]);
+        let application = "ping -n 2 127.0.0.1 >NUL & exit 23";
+        let installed = cli(&["install", &service, &command_prompt, "/c", application]);
+        assert!(
+            installed.status.success(),
+            "install failed: {}",
+            String::from_utf8_lossy(&installed.stderr)
+        );
+        assert!(
+            cli(&["set", &service, "AppExit", "Default", "Exit"])
+                .status
+                .success()
+        );
+        let configured_action = cli(&["set", &service, "AppExit", "23", action]);
+        assert!(
+            configured_action.status.success(),
+            "{action} exit rule set failed: {}",
+            String::from_utf8_lossy(&configured_action.stderr)
+        );
+        let hook = format!("cmd.exe /c echo exit-%NSSM_EXITCODE%>>\"{exit_path}\"");
+        let configured_hook = cli(&["set", &service, "AppEvents", "Exit/Post", &hook]);
+        assert!(
+            configured_hook.status.success(),
+            "Exit/Post hook set failed: {}",
+            String::from_utf8_lossy(&configured_hook.stderr)
+        );
+
+        let _ = cli(&["start", &service]);
+        let mut observed = false;
+        for _ in 0..100 {
+            let status = cli(&["status", &service]);
+            let current_state = String::from_utf8_lossy(&status.stdout).trim().to_owned();
+            let exit_hook = std::fs::read_to_string(&exit_path).unwrap_or_default();
+            if current_state == expected_state && exit_hook.trim() == "exit-23" {
+                observed = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            observed,
+            "{action} did not produce {expected_state} with exit code 23; status={:?}, hook={:?}",
+            cli(&["status", &service]).stdout,
+            std::fs::read_to_string(&exit_path)
+        );
+        if action == "Ignore" {
+            thread::sleep(Duration::from_millis(500));
+            assert_eq!(
+                std::fs::read_to_string(&exit_path)
+                    .expect("exit hook marker exists")
+                    .lines()
+                    .count(),
+                1,
+                "Ignore restarted the application"
+            );
+            let stopped = cli(&["stop", &service]);
+            assert!(
+                stopped.status.success(),
+                "stop failed: {}",
+                String::from_utf8_lossy(&stopped.stderr)
+            );
+        }
+    }
+}
+
+#[test]
 fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
