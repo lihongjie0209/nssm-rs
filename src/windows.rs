@@ -3248,7 +3248,13 @@ fn read_reg_dword(service: &str, value: &str, default: u32) -> Result<u32, Strin
         )
     };
     if code != 0 {
-        return Err(registry_error(code));
+        let error = registry_error(code);
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_QUERYVALUE_FAILED,
+            &[value, &error],
+        );
+        return Err(error);
     }
     let mut kind = 0;
     let mut data = 0u32;
@@ -3270,10 +3276,13 @@ fn read_reg_dword(service: &str, value: &str, default: u32) -> Result<u32, Strin
         return Ok(default);
     }
     if code != 0 {
-        return Err(registry_error(code));
-    }
-    if kind != REG_DWORD || bytes != std::mem::size_of::<u32>() as u32 {
-        return Err(format!("service setting {value} is not a DWORD"));
+        let error = registry_error(code);
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_QUERYVALUE_FAILED,
+            &[value, &error],
+        );
+        return Err(error);
     }
     Ok(data)
 }
@@ -4958,10 +4967,40 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             return;
         }
     };
-    let stdout_copy_and_truncate =
-        read_number_or_default(&service_name, "AppStdoutCopyAndTruncate", 0) != 0;
-    let stderr_copy_and_truncate =
-        read_number_or_default(&service_name, "AppStderrCopyAndTruncate", 0) != 0;
+    let stdout_copy_and_truncate = if stdout_path.is_some() {
+        match read_reg_dword(&service_name, "AppStdoutCopyAndTruncate", 0) {
+            Ok(value) => value != 0,
+            Err(_) => {
+                report_stdio_setup_failure(&service_name, &app, &StdioFileError::Configuration);
+                set_status_with_service_exit(
+                    SERVICE_STOPPED,
+                    windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                    4,
+                    0,
+                );
+                return;
+            }
+        }
+    } else {
+        false
+    };
+    let stderr_copy_and_truncate = if stderr_path.is_some() {
+        match read_reg_dword(&service_name, "AppStderrCopyAndTruncate", 0) {
+            Ok(value) => value != 0,
+            Err(_) => {
+                report_stdio_setup_failure(&service_name, &app, &StdioFileError::Configuration);
+                set_status_with_service_exit(
+                    SERVICE_STOPPED,
+                    windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                    4,
+                    0,
+                );
+                return;
+            }
+        }
+    } else {
+        false
+    };
     let timestamp_log = read_number_or_default(&service_name, "AppTimestampLog", 0) != 0;
     let mut throttle = nssm_rs::RestartThrottle::new(restart_delay_ms);
     let mut stop_hook_invoked = false;
