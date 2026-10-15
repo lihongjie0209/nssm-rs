@@ -84,7 +84,10 @@ Required command set: `install`, `remove`, `start`, `stop`, `restart`, `pause`,
 must emit valid, safely quoted command lines that can recreate the configuration.
 `status` reports a symbolic `SERVICE_*` state and exits successfully when the
 query succeeds. `statuscode` prints the same symbolic state and returns the
-numeric SCM state as its process exit code; query failure returns zero.
+numeric SCM state as its process exit code; query failure returns zero. `dump`
+uses NSSM's own export behavior, including its omission of code-specific
+`AppExit` actions and repeated default-action lines when multiple AppExit values
+exist.
 
 ## Test plan
 
