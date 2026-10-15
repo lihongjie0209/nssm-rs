@@ -240,7 +240,7 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
             .lines()
             .any(|line| line == service)
     );
-    let all = cli(&["list", "all"]);
+    let all = cli(&["list", "all", "ignored"]);
     assert!(all.status.success());
     assert!(
         String::from_utf8_lossy(&all.stdout)

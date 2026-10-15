@@ -457,16 +457,9 @@ pub fn parse_args(args: &[String]) -> Result<Command, ParseError> {
                 new_name: rest.get(1).cloned(),
             })
         }
-        "list" => {
-            if rest.len() > 1 || rest.first().is_some_and(|x| !x.eq_ignore_ascii_case("all")) {
-                return Err(ParseError(
-                    "list accepts only the optional argument 'all'".into(),
-                ));
-            }
-            Ok(Command::List {
-                all: rest.first().is_some_and(|x| x.eq_ignore_ascii_case("all")),
-            })
-        }
+        "list" => Ok(Command::List {
+            all: rest.first().is_some_and(|x| x.eq_ignore_ascii_case("all")),
+        }),
         "get" | "set" | "reset" | "unset" => {
             if rest.len() < 2 {
                 return Err(ParseError(format!(

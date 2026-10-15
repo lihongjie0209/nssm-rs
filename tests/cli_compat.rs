@@ -85,7 +85,14 @@ fn parses_remove_list_and_dump_variants() {
             new_name: Some("copy".into())
         }
     );
-    assert!(parse_args(&args(&["list", "unexpected"])).is_err());
+    assert_eq!(
+        parse_args(&args(&["list", "unexpected"])).unwrap(),
+        Command::List { all: false }
+    );
+    assert_eq!(
+        parse_args(&args(&["list", "all", "ignored"])).unwrap(),
+        Command::List { all: true }
+    );
 }
 
 #[test]
