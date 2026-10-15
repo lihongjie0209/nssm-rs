@@ -548,6 +548,94 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
 }
 
 #[test]
+fn all_dword_settings_round_trip_and_reset_to_nssm_defaults() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let ping =
+        std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()) + "\\System32\\PING.EXE";
+    let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let settings = [
+        ("AppNoConsole", "1", "1", "0"),
+        (
+            "AppPriority",
+            "HIGH_PRIORITY_CLASS",
+            "HIGH_PRIORITY_CLASS",
+            "NORMAL_PRIORITY_CLASS",
+        ),
+        ("AppRestartDelay", "321", "321", "0"),
+        ("AppStdinShareMode", "3", "3", "2"),
+        ("AppStdinCreationDisposition", "2", "2", "3"),
+        ("AppStdinFlagsAndAttributes", "256", "256", "128"),
+        ("AppStdoutShareMode", "2", "2", "3"),
+        ("AppStdoutCreationDisposition", "3", "3", "4"),
+        ("AppStdoutFlagsAndAttributes", "256", "256", "128"),
+        ("AppStdoutCopyAndTruncate", "1", "1", "0"),
+        ("AppStderrShareMode", "2", "2", "3"),
+        ("AppStderrCreationDisposition", "3", "3", "4"),
+        ("AppStderrFlagsAndAttributes", "256", "256", "128"),
+        ("AppStderrCopyAndTruncate", "1", "1", "0"),
+        ("AppStopMethodSkip", "7", "7", "0"),
+        ("AppStopMethodConsole", "321", "321", "1500"),
+        ("AppStopMethodWindow", "321", "321", "1500"),
+        ("AppStopMethodThreads", "321", "321", "1500"),
+        ("AppKillProcessTree", "0", "0", "1"),
+        ("AppThrottle", "321", "321", "1500"),
+        ("AppRedirectHook", "1", "1", "0"),
+        ("AppRotateFiles", "1", "1", "0"),
+        ("AppRotateOnline", "1", "1", "0"),
+        ("AppRotateSeconds", "321", "321", "0"),
+        ("AppRotateBytes", "1234", "1234", "0"),
+        ("AppRotateBytesHigh", "2", "2", "0"),
+        ("AppRotateDelay", "321", "321", "0"),
+        ("AppTimestampLog", "1", "1", "0"),
+    ];
+
+    for (setting, value, expected_value, expected_default) in settings {
+        let configured = cli(&["set", &service, setting, value]);
+        assert!(
+            configured.status.success(),
+            "set {setting} failed: {}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+        let queried = cli(&["get", &service, setting]);
+        assert!(
+            queried.status.success(),
+            "get {setting} failed: {}",
+            String::from_utf8_lossy(&queried.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&queried.stdout).trim(),
+            expected_value,
+            "{setting} did not read back its configured value"
+        );
+
+        let reset = cli(&["reset", &service, setting]);
+        assert!(
+            reset.status.success(),
+            "reset {setting} failed: {}",
+            String::from_utf8_lossy(&reset.stderr)
+        );
+        let queried = cli(&["get", &service, setting]);
+        assert!(
+            queried.status.success(),
+            "get default {setting} failed: {}",
+            String::from_utf8_lossy(&queried.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&queried.stdout).trim(),
+            expected_default,
+            "reset {setting} did not restore the NSSM default"
+        );
+    }
+}
+
+#[test]
 fn missing_service_commands_return_nssm_service_lookup_status() {
     let service = unique_service_name();
     for arguments in [

@@ -39,7 +39,7 @@ interface and Windows service behavior. GUI workflows are explicitly excluded.
 | Hooks | `AppEvents <event>/<action> <command>` for service/app start, stop, rotate lifecycle and pre/post phases; hook output-handle behavior and all `NSSM_*` ABI variables | Event-order integration assertions for normal start, restart, stop, rotation, failures, and cancellation; assert the full environment ABI on real Start, Exit, Stop and Rotate hooks |
 | Discovery/reporting | `list` and `list all`; `processes <name>`; `dump <name>` and `dump <name> <newname>` | Golden output tests, quoting/escaping round-trip, process tree correctness, native-service filtering |
 | Windows process launch | Correct Windows quoting, Unicode paths/args, environment expansion, priority, CPU affinity, console/window behavior | Launch fixture with argv/environment echo, Unicode and special-character cases, priority/affinity inspection |
-| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; currently events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, and 1020 are verified |
+| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, 1020, 1034, 1035, 1040, 1041, 1072 and 1077 are verified |
 
 ### Complete setting-name inventory
 
@@ -121,7 +121,10 @@ streams; and online/on-demand log rotation. It passes locally on Windows and in
 GitHub Actions. CI runs the Windows unit/CLI suite and the full SCM integration
 suite as separate named steps. The standalone SCM smoke test also verifies
 configuration readback, running state, wrapped process reporting, stop, removal
-and service disappearance. Live log rotation closes and moves the active file
+and service disappearance. A dedicated Windows settings integration test now
+round-trips and resets all 28 managed DWORD settings against the real service
+registry, including priority name normalization and each setting's default.
+Live log rotation closes and moves the active file
 when CopyAndTruncate is disabled, or copies and truncates the same active file
 when enabled; Windows integration tests check backup data, continued output and
 active-file identity for both modes. The stream redirection test now exercises
