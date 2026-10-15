@@ -22,6 +22,7 @@ It is a partial report, not the command-by-command release acceptance report.
 | `list definitely-not-all` | Both exited 0. The host had no NSSM-managed services, so both returned no names. |
 | `list` and `list all` | Rechecked both commands against the pinned executable on 2026-10-15; output and exit status matched on this host. |
 | `status Spooler` and `statuscode Spooler` | Output and status matched exactly. Both statuscode invocations returned the host's `SERVICE_RUNNING` numeric code (4). |
+| `processes Spooler` when the service process cannot be opened | Both exited 0 and emitted no process-tree stdout. NSSM reports the process-open failure on stderr; nssm-rs now does the same rather than printing a fabricated `???` root. PowerShell remoting altered the reference's localized stderr encoding, so exact error-text bytes remain unverified. |
 | `get Spooler Start` | Both exited 0 and returned the same startup type. |
 | `get Spooler Type` | Both exited 0 and returned the same service type. |
 | `get Spooler DisplayName` | Both exited 0 and returned the same display name. |
