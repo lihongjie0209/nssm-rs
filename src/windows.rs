@@ -3743,7 +3743,7 @@ fn update_stop_pending_progress(interval_ms: u32) {
         return;
     }
     let status = SERVICE_STATUS {
-        dwServiceType: SERVICE_WIN32_OWN_PROCESS,
+        dwServiceType: service_status_type(),
         dwCurrentState: SERVICE_STOP_PENDING,
         dwControlsAccepted: 0,
         dwWin32ExitCode: NO_ERROR,
@@ -4492,7 +4492,7 @@ fn set_status_with_controls(
         return;
     }
     let status = SERVICE_STATUS {
-        dwServiceType: SERVICE_WIN32_OWN_PROCESS,
+        dwServiceType: service_status_type(),
         dwCurrentState: state,
         dwControlsAccepted: controls_accepted,
         dwWin32ExitCode: win32_exit_code,
@@ -4503,6 +4503,10 @@ fn set_status_with_controls(
     unsafe {
         SetServiceStatus(handle, &status);
     }
+}
+
+fn service_status_type() -> u32 {
+    SERVICE_WIN32_OWN_PROCESS | SERVICE_INTERACTIVE_PROCESS_FLAG
 }
 
 fn set_status_for_application_start() {

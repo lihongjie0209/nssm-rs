@@ -43,7 +43,9 @@ fn wait_for_state(service: &str, expected: &str) -> bool {
     false
 }
 
-fn accepted_service_controls(service: &str) -> Option<u32> {
+fn service_status_snapshot(
+    service: &str,
+) -> Option<windows_sys::Win32::System::Services::SERVICE_STATUS> {
     use windows_sys::Win32::System::Services::{
         CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT,
         SERVICE_QUERY_STATUS,
@@ -65,7 +67,7 @@ fn accepted_service_controls(service: &str) -> Option<u32> {
         CloseServiceHandle(handle);
         CloseServiceHandle(manager);
     }
-    queried.then(|| unsafe { status.assume_init().dwControlsAccepted })
+    queried.then(|| unsafe { status.assume_init() })
 }
 
 #[test]
@@ -95,12 +97,18 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
         wait_for_state(&service, "SERVICE_RUNNING"),
         "service never reached SERVICE_RUNNING"
     );
-    let accepted_controls =
-        accepted_service_controls(&service).expect("SCM returns the running service status");
+    let service_status =
+        service_status_snapshot(&service).expect("SCM returns the running service status");
     assert_ne!(
-        accepted_controls & windows_sys::Win32::System::Services::SERVICE_ACCEPT_POWEREVENT,
+        service_status.dwControlsAccepted
+            & windows_sys::Win32::System::Services::SERVICE_ACCEPT_POWEREVENT,
         0,
         "running service registers for power broadcast controls"
+    );
+    assert_eq!(
+        service_status.dwServiceType,
+        windows_sys::Win32::System::Services::SERVICE_WIN32_OWN_PROCESS | 0x100,
+        "service status type matches NSSM"
     );
     let status_code = cli(&["statuscode", &service]);
     assert_eq!(status_code.status.code(), Some(4));
