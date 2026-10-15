@@ -1,8 +1,8 @@
 use nssm_r::{
     Command, ExitAction, MANAGED_SETTINGS, SettingKind, StopMethod, compose_child_environment,
     edit_dependencies, edit_environment, expand_environment_value, log_rotation_due,
-    managed_setting, normalize_exit_action, parse_cpu_affinity, quote_windows_arg,
-    rotated_log_path, split_windows_args,
+    managed_setting, normalize_cpu_affinity, normalize_exit_action, parse_cpu_affinity,
+    quote_windows_arg, rotated_log_path, split_windows_args,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -661,11 +661,20 @@ fn get_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), S
                 number.to_string()
             }
         }
-        SettingKind::String => raw
-            .map(|(_, bytes)| decode_wide(&bytes))
-            .transpose()?
-            .or_else(|| spec.default.map(str::to_owned))
-            .unwrap_or_default(),
+        SettingKind::String => {
+            let value = raw
+                .map(|(_, bytes)| decode_wide(&bytes))
+                .transpose()?
+                .or_else(|| spec.default.map(str::to_owned))
+                .unwrap_or_default();
+            if parameter.eq_ignore_ascii_case("AppAffinity") {
+                normalize_cpu_affinity(&value)
+                    .map_err(|error| error.to_string())?
+                    .unwrap_or_else(|| "All".to_owned())
+            } else {
+                value
+            }
+        }
     };
     println!("{display}");
     Ok(())
@@ -755,15 +764,22 @@ fn set_setting(service: &str, parameter: &str, values: &[String]) -> Result<(), 
             if values.is_empty() {
                 return Err(format!("set {parameter} requires a value"));
             }
+            let value = if parameter.eq_ignore_ascii_case("AppAffinity") {
+                match normalize_cpu_affinity(&value).map_err(|error| error.to_string())? {
+                    Some(value) => value,
+                    None => return delete_raw_value(key.0, value_name.as_deref()),
+                }
+            } else {
+                value
+            };
             let kind = if parameter.eq_ignore_ascii_case("AppAffinity") {
                 REG_SZ
             } else {
                 REG_EXPAND_SZ
             };
-            if (spec
+            if spec
                 .default
-                .is_some_and(|default| !default.is_empty() && default == value))
-                || (parameter.eq_ignore_ascii_case("AppAffinity") && value.is_empty())
+                .is_some_and(|default| !default.is_empty() && default == value)
             {
                 delete_raw_value(key.0, value_name.as_deref())
             } else {
@@ -3722,11 +3738,39 @@ fn status_code(name: &str) -> Result<u8, String> {
 }
 
 pub fn execute(command: Command) -> Result<u8, String> {
-    if let Command::StatusCode(name) = command {
-        return status_code(&name);
+    match command {
+        Command::StatusCode(name) => status_code(&name),
+        Command::Set {
+            service,
+            parameter,
+            values,
+        } if parameter.eq_ignore_ascii_case("AppAffinity") => {
+            if values.is_empty() {
+                return Err("set AppAffinity requires a value".into());
+            }
+            if let Err(error) = open_service(&service, SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG)
+            {
+                eprintln!("nssm-r: {error}");
+                return Ok(3);
+            }
+            if read_optional_reg_string(&service, "Application")
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                eprintln!("nssm-r: AppAffinity is only valid for nssm-r services");
+                return Ok(1);
+            }
+            match set_setting(&service, &parameter, &values) {
+                Ok(()) => Ok(0),
+                Err(error) => {
+                    eprintln!("nssm-r: {error}");
+                    Ok(6)
+                }
+            }
+        }
+        command => execute_service_command(command).map(|()| 0),
     }
-
-    execute_service_command(command).map(|()| 0)
 }
 
 fn execute_service_command(command: Command) -> Result<(), String> {

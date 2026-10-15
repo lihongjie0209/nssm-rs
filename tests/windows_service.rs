@@ -360,6 +360,43 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     assert!(cli(&["reset", &service, "AppAffinity"]).status.success());
     let affinity = cli(&["get", &service, "AppAffinity"]);
     assert_eq!(String::from_utf8_lossy(&affinity.stdout).trim(), "All");
+    for (input, expected) in [("0-1", "0,1"), ("0,1,2", "0-2")] {
+        let configured = cli(&["set", &service, "AppAffinity", input]);
+        assert!(
+            configured.status.success(),
+            "affinity {input} should be accepted: {}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+        let affinity = cli(&["get", &service, "AppAffinity"]);
+        assert_eq!(String::from_utf8_lossy(&affinity.stdout).trim(), expected);
+    }
+    assert!(
+        cli(&["set", &service, "AppAffinity", "0-64"])
+            .status
+            .success()
+    );
+    let affinity = cli(&["get", &service, "AppAffinity"]);
+    assert_eq!(String::from_utf8_lossy(&affinity.stdout).trim(), "0-63");
+    let invalid_cpu = cli(&["set", &service, "AppAffinity", "64"]);
+    assert_eq!(
+        invalid_cpu.status.code(),
+        Some(6),
+        "NSSM returns status 6 for an invalid affinity value"
+    );
+    let affinity = cli(&["get", &service, "AppAffinity"]);
+    assert_eq!(String::from_utf8_lossy(&affinity.stdout).trim(), "0-63");
+    for default in ["All", "Default", "*"] {
+        assert!(
+            cli(&["set", &service, "AppAffinity", default])
+                .status
+                .success()
+        );
+        let affinity = cli(&["get", &service, "AppAffinity"]);
+        assert_eq!(String::from_utf8_lossy(&affinity.stdout).trim(), "All");
+        let dumped = cli(&["dump", &service, "AffinityDefaultCopy"]);
+        assert!(dumped.status.success());
+        assert!(!String::from_utf8_lossy(&dumped.stdout).contains("AppAffinity"));
+    }
 
     let set_exit = cli(&["set", &service, "AppExit", "23", "Ignore"]);
     assert!(

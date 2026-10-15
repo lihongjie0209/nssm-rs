@@ -880,6 +880,78 @@ pub fn parse_cpu_affinity(value: &str) -> Result<u64, ParseError> {
     Ok(mask)
 }
 
+/// Converts an NSSM affinity value to its canonical CPU-list representation.
+/// `None` represents NSSM's inherited system affinity (`All`, `Default`, or empty).
+pub fn normalize_cpu_affinity(value: &str) -> Result<Option<String>, ParseError> {
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("all")
+        || value.eq_ignore_ascii_case("default")
+        || value == "*"
+    {
+        return Ok(None);
+    }
+    let mut mask = 0u64;
+    for item in value.split(',') {
+        if item.is_empty() {
+            return Err(ParseError("CPU affinity contains an empty item".into()));
+        }
+        let mut bounds = item.split('-');
+        let start = bounds
+            .next()
+            .unwrap()
+            .parse::<u32>()
+            .map_err(|_| ParseError(format!("invalid CPU affinity item: {item}")))?;
+        if start >= u64::BITS {
+            return Err(ParseError(format!("CPU affinity range is invalid: {item}")));
+        }
+        let end = match bounds.next() {
+            Some(end) => end
+                .parse::<u32>()
+                .map_err(|_| ParseError(format!("invalid CPU affinity range: {item}")))?,
+            None => start,
+        };
+        if bounds.next().is_some() {
+            return Err(ParseError(format!("CPU affinity range is invalid: {item}")));
+        }
+        if end < start {
+            continue;
+        }
+        if end - start >= u64::BITS {
+            mask = u64::MAX;
+            continue;
+        }
+        for cpu in start..=end {
+            mask |= 1u64 << (cpu % u64::BITS);
+        }
+    }
+    if mask == 0 {
+        return Ok(None);
+    }
+
+    let mut ranges = Vec::new();
+    let mut cpu = 0;
+    while cpu < u64::BITS {
+        if mask & (1u64 << cpu) == 0 {
+            cpu += 1;
+            continue;
+        }
+        let start = cpu;
+        while cpu + 1 < u64::BITS && mask & (1u64 << (cpu + 1)) != 0 {
+            cpu += 1;
+        }
+        let end = cpu;
+        if end == start {
+            ranges.push(start.to_string());
+        } else if end == start + 1 {
+            ranges.push(format!("{start},{end}"));
+        } else {
+            ranges.push(format!("{start}-{end}"));
+        }
+        cpu += 1;
+    }
+    Ok(Some(ranges.join(",")))
+}
+
 #[cfg(test)]
 mod policy_tests {
     use super::*;
@@ -1077,6 +1149,25 @@ mod policy_tests {
         assert!(parse_cpu_affinity("2-1").is_err());
         assert!(parse_cpu_affinity("0,,2").is_err());
         assert!(parse_cpu_affinity("64").is_err());
+    }
+
+    #[test]
+    fn cpu_affinity_values_match_nssm_default_and_canonical_forms() {
+        assert_eq!(normalize_cpu_affinity("All"), Ok(None));
+        assert_eq!(normalize_cpu_affinity("Default"), Ok(None));
+        assert_eq!(normalize_cpu_affinity("*"), Ok(None));
+        assert_eq!(normalize_cpu_affinity("0-1"), Ok(Some("0,1".into())));
+        assert_eq!(normalize_cpu_affinity("0,1,2"), Ok(Some("0-2".into())));
+        assert_eq!(normalize_cpu_affinity("0-64"), Ok(Some("0-63".into())));
+        assert_eq!(
+            normalize_cpu_affinity("64"),
+            Err(ParseError("CPU affinity range is invalid: 64".into()))
+        );
+        assert_eq!(normalize_cpu_affinity("4-3"), Ok(None));
+        assert_eq!(
+            normalize_cpu_affinity("1,3-4,6"),
+            Ok(Some("1,3,4,6".into()))
+        );
     }
 
     #[test]
