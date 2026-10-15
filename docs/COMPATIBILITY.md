@@ -108,14 +108,19 @@ Start, Type, service Environment and service/group dependency lists. Direct
 stdin/stdout/stderr file redirection, staged console/window/thread shutdown,
 startup and online/on-demand log rotation, UTC per-line log timestamps,
 Start/Pre, Start/Post, Stop/Pre, Exit/Post, Rotate and Power hooks, and
-configuration dump are implemented. GitHub Actions now runs a dedicated
-Windows SCM smoke test that creates a real temporary service, verifies its
-configuration, starts it, checks the wrapped process and numeric state, stops
-it, removes it, and confirms it disappeared. Live log rotation now closes and
-moves the active file when CopyAndTruncate is disabled, or copies and truncates
-the same active file when enabled; Windows integration tests check backup data,
-continued output and active-file identity for both modes. Remaining acceptance
-scope includes complete hook environment compatibility, broader event/error-path
-coverage, and command-by-command parity against the pinned reference. Do not
-call this a complete NSSM replacement or publish a stable release until each
-acceptance row has evidence.
+configuration dump are implemented. The Windows integration suite checks real
+SCM install/start/stop/remove; process-tree reporting and descendant termination;
+Start/Pre abort behavior; hook output redirection and event ordering; restart,
+ignore and exit policies; environment composition; all three child standard
+streams; and online/on-demand log rotation. It passes locally on Windows and in
+GitHub Actions. CI runs the Windows unit/CLI suite and the full SCM integration
+suite as separate named steps. The standalone SCM smoke test also verifies
+configuration readback, running state, wrapped process reporting, stop, removal
+and service disappearance. Live log rotation closes and moves the active file
+when CopyAndTruncate is disabled, or copies and truncates the same active file
+when enabled; Windows integration tests check backup data, continued output and
+active-file identity for both modes. Remaining acceptance scope includes full
+hook ABI compatibility, graceful-signal-specific shutdown fixtures, broader
+error-path coverage, and command-by-command parity against the pinned reference.
+Do not call this a complete NSSM replacement or publish a stable release until
+each acceptance row has evidence.
