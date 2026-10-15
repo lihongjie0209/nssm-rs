@@ -48,6 +48,7 @@ use windows_sys::Win32::{
 
 const DELETE_ACCESS: u32 = 0x0001_0000;
 const STOP_SKIP_CONSOLE: u32 = 1;
+const SERVICE_INTERACTIVE_PROCESS_FLAG: u32 = 0x100;
 const EVENT_DISPATCHER_FAILED: u32 = 0xc000_03e9;
 const EVENT_START_SERVICE_FAILED: u32 = 0xc000_03ee;
 const EVENT_STARTED_SERVICE: u32 = 0x4000_03f0;
@@ -439,6 +440,22 @@ fn format_cli_multi_string(values: &[String]) -> String {
     // NSSM builds CRLF-separated REG_MULTI_SZ text, then writes it through the
     // Windows text-mode CRT, which translates the trailing LF to CRLF.
     values.join("\r\r\n")
+}
+
+fn service_type_name(service_type: u32) -> &'static str {
+    match service_type {
+        SERVICE_KERNEL_DRIVER => "SERVICE_KERNEL_DRIVER",
+        SERVICE_FILE_SYSTEM_DRIVER => "SERVICE_FILE_SYSTEM_DRIVER",
+        SERVICE_WIN32_OWN_PROCESS => "SERVICE_WIN32_OWN_PROCESS",
+        SERVICE_WIN32_SHARE_PROCESS => "SERVICE_WIN32_SHARE_PROCESS",
+        value if value == (SERVICE_WIN32_OWN_PROCESS | SERVICE_INTERACTIVE_PROCESS_FLAG) => {
+            "SERVICE_INTERACTIVE_PROCESS"
+        }
+        value if value == (SERVICE_WIN32_SHARE_PROCESS | SERVICE_INTERACTIVE_PROCESS_FLAG) => {
+            "SERVICE_WIN32_SHARE_PROCESS|SERVICE_INTERACTIVE_PROCESS"
+        }
+        _ => "?",
+    }
 }
 
 fn encode_multi_string(values: &[String]) -> Vec<u8> {
@@ -1066,13 +1083,7 @@ fn get_native_setting(service: &str, parameter: &str, extra: &[String]) -> Resul
                         }
                     }
                 }
-                "type" => match config.dwServiceType {
-                    SERVICE_WIN32_OWN_PROCESS => "SERVICE_WIN32_OWN_PROCESS".into(),
-                    value if value == (SERVICE_WIN32_OWN_PROCESS | 0x100) => {
-                        "SERVICE_INTERACTIVE_PROCESS".into()
-                    }
-                    _ => format!("SERVICE_TYPE_{}", config.dwServiceType),
-                },
+                "type" => service_type_name(config.dwServiceType).into(),
                 _ => unreachable!(),
             };
             println!("{value}\r");
@@ -4348,7 +4359,7 @@ mod tests {
         PowerHookAction, PowerHookInvocation, SERVICE_CONTROL_PAUSE, elevation_arguments,
         elevation_parameters, hook_deadline_ms, parse_u32, power_hook_action,
         power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
-        quote_dump_arg, service_control_event, valid_hook,
+        quote_dump_arg, service_control_event, service_type_name, valid_hook,
     };
 
     #[test]
@@ -4450,6 +4461,37 @@ mod tests {
     fn power_hook_actions_use_nssm_hook_names() {
         assert_eq!(PowerHookAction::Change.hook_action(), "Change");
         assert_eq!(PowerHookAction::Resume.hook_action(), "Resume");
+    }
+
+    #[test]
+    fn service_type_names_match_nssm_for_all_supported_types() {
+        use windows_sys::Win32::System::Services as services;
+
+        assert_eq!(
+            service_type_name(services::SERVICE_KERNEL_DRIVER),
+            "SERVICE_KERNEL_DRIVER"
+        );
+        assert_eq!(
+            service_type_name(services::SERVICE_FILE_SYSTEM_DRIVER),
+            "SERVICE_FILE_SYSTEM_DRIVER"
+        );
+        assert_eq!(
+            service_type_name(services::SERVICE_WIN32_OWN_PROCESS),
+            "SERVICE_WIN32_OWN_PROCESS"
+        );
+        assert_eq!(
+            service_type_name(services::SERVICE_WIN32_SHARE_PROCESS),
+            "SERVICE_WIN32_SHARE_PROCESS"
+        );
+        assert_eq!(
+            service_type_name(services::SERVICE_WIN32_OWN_PROCESS | 0x100),
+            "SERVICE_INTERACTIVE_PROCESS"
+        );
+        assert_eq!(
+            service_type_name(services::SERVICE_WIN32_SHARE_PROCESS | 0x100),
+            "SERVICE_WIN32_SHARE_PROCESS|SERVICE_INTERACTIVE_PROCESS"
+        );
+        assert_eq!(service_type_name(0xffff), "?");
     }
 
     #[test]

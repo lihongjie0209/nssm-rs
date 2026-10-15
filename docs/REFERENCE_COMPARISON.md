@@ -29,6 +29,7 @@ It is a partial report, not the command-by-command release acceptance report.
 | String and hook setting set/get/reset sweep | AppParameters, AppDirectory, AppStdin, AppStdout, AppStderr, AppAffinity, AppEnvironment, AppEnvironmentExtra, AppExit and AppEvents matched in values and reset defaults. On this host, resetting AppParameters or AppDirectory with the pinned NSSM binary terminated it with Windows status `0xC0000374` (heap corruption); nssm-rs completes the same reset successfully. This reference crash is recorded as an intentional safety difference. |
 | `get Spooler Start` | Both exited 0 and returned the same startup type. |
 | `get Spooler Type` | Both exited 0 and returned the same service type. |
+| `get Schedule Type` | The pinned NSSM returns `SERVICE_WIN32_SHARE_PROCESS`; nssm-rs initially returned `SERVICE_TYPE_32`. Native type formatting now matches all six NSSM service-type names, with unit coverage and a Windows SCM assertion for a shared-process service. |
 | `get Spooler DisplayName` | Both exited 0 and returned the same display name. |
 | `get Spooler ObjectName` | Both exited 0 and returned the same account name. |
 | `get Schedule AppRotateBytes` | Both exited 1 with empty stdout and the same diagnostic: `Parameter "AppRotateBytes" is only valid for services managed by NSSM!`. nssm-rs now identifies native services before looking up managed settings; a Windows integration regression test covers this path. |

@@ -819,6 +819,13 @@ fn missing_service_commands_return_nssm_service_lookup_status() {
 
 #[test]
 fn managed_settings_on_native_services_return_nssm_compatibility_error() {
+    let service_type = cli(&["get", "Schedule", "Type"]);
+    assert!(service_type.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&service_type.stdout).trim(),
+        "SERVICE_WIN32_SHARE_PROCESS"
+    );
+
     let result = cli(&["get", "Schedule", "AppRotateBytes"]);
     assert_eq!(result.status.code(), Some(1));
     assert!(result.stdout.is_empty());
