@@ -401,7 +401,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, ParseError> {
     if op.eq_ignore_ascii_case("help") || op == "-h" || op == "--help" {
         return Ok(Command::Help);
     }
-    if op.eq_ignore_ascii_case("version") || op == "-v" || op == "--version" {
+    if is_version_request(op) {
         return Ok(Command::Version);
     }
     let need_service = || {
@@ -494,6 +494,26 @@ pub fn parse_args(args: &[String]) -> Result<Command, ParseError> {
         }
         _ => Err(ParseError(format!("unknown command: {op}"))),
     }
+}
+
+fn is_version_request(argument: &str) -> bool {
+    if argument.eq_ignore_ascii_case("version")
+        || argument
+            .strip_prefix('/')
+            .is_some_and(|value| value.eq_ignore_ascii_case("version"))
+    {
+        return true;
+    }
+    let Some(argument) = argument.strip_prefix('-') else {
+        return false;
+    };
+    if argument.eq_ignore_ascii_case("v") {
+        return true;
+    }
+    argument
+        .strip_prefix('-')
+        .unwrap_or(argument)
+        .eq_ignore_ascii_case("version")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

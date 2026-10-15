@@ -129,6 +129,30 @@ fn parses_remaining_cli_controls_and_unset_alias() {
 }
 
 #[test]
+fn parses_all_nssm_version_switch_spellings() {
+    for spelling in [
+        "version",
+        "VERSION",
+        "/version",
+        "/VERSION",
+        "-v",
+        "-V",
+        "-version",
+        "-VERSION",
+        "--version",
+        "--VERSION",
+    ] {
+        assert_eq!(
+            parse_args(&args(&[spelling])).unwrap(),
+            Command::Version,
+            "version switch {spelling:?}"
+        );
+    }
+    assert!(parse_args(&args(&["v"])).is_err());
+    assert!(parse_args(&args(&["--v"])).is_err());
+}
+
+#[test]
 fn applies_environment_overrides_additions_and_conditional_removals() {
     let original = args(&["TEMP=C:\\Temp", "PATH=base"]);
     let out = edit_environment(&original, &args(&["+temp=C:\\tmp", "NEW=yes"])).unwrap();
