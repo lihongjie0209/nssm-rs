@@ -950,6 +950,30 @@ fn missing_service_commands_return_nssm_service_lookup_status() {
 }
 
 #[test]
+fn unknown_setting_is_reported_before_missing_service_lookup() {
+    let service = unique_service_name();
+
+    for args in [
+        vec!["get", service.as_str(), "NssmRUnknownSetting"],
+        vec!["set", service.as_str(), "NssmRUnknownSetting", "value"],
+        vec!["reset", service.as_str(), "NssmRUnknownSetting"],
+    ] {
+        let output = cli(&args);
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        assert!(output.stdout.is_empty(), "args: {args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with("Invalid parameter \"NssmRUnknownSetting\"."),
+            "args: {args:?}, stderr: {stderr:?}"
+        );
+        assert!(
+            !stderr.contains("OpenService"),
+            "unknown setting was masked by missing service: {stderr:?}"
+        );
+    }
+}
+
+#[test]
 fn processes_on_missing_service_returns_reference_command_status() {
     let service = unique_service_name();
     let result = cli(&["processes", &service]);

@@ -5245,12 +5245,6 @@ pub fn execute(command: Command) -> Result<u8, String> {
         | Command::Help
         | Command::Version => None,
     };
-    if let Some(service) = service
-        && let Some(error) = missing_service_error(service)
-    {
-        print_open_service_error(&error);
-        return Ok(3);
-    }
     let invalid_parameter = match &command {
         Command::Get { parameter, .. }
         | Command::Set { parameter, .. }
@@ -5265,6 +5259,12 @@ pub fn execute(command: Command) -> Result<u8, String> {
     if let Some(parameter) = invalid_parameter {
         print_invalid_parameter(parameter);
         return Ok(1);
+    }
+    if let Some(service) = service
+        && let Some(error) = missing_service_error(service)
+    {
+        print_open_service_error(&error);
+        return Ok(3);
     }
     if let Command::Get {
         parameter, extra, ..
