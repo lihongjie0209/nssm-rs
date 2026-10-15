@@ -210,6 +210,13 @@ stream contract, plus missing-subparameter precedence for `AppExit` and
 caught and resolved the extra carriage return NSSM emits for managed-setting
 rejection and the process-open error's system message and trailing blank line;
 Windows process/unit tests cover these cases.
+The same reference workflow now runs an 18-operation disposable service
+lifecycle comparison using `PING.EXE` as the child. Install, configuration
+readback, Description set/reset, start, running status, repeated start, stop,
+stopped status, repeated stop and confirmed removal match exit codes and raw
+stdout/stderr bytes against the pinned executable. This verified NSSM's
+already-running start failure and already-stopped stop success behavior, as
+well as lifecycle success-message text and line endings.
 
 The service host now distinguishes an initial child launch failure from a
 failed launch after an application Restart action. The latter reports warning
