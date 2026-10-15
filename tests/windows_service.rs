@@ -529,7 +529,7 @@ fn runs_configured_start_and_exit_hooks() {
         String::from_utf8_lossy(&installed.stderr)
     );
     for ((event_action, marker), path) in [
-        ("Start/Pre", "start-pre"),
+        ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_COMMAND_LINE%"),
         ("Start/Post", "start-post"),
         ("Exit/Post", "exit-post"),
     ]
@@ -564,12 +564,24 @@ fn runs_configured_start_and_exit_hooks() {
         hooks_ran,
         "not all configured lifecycle hooks created their marker files"
     );
-    for (path, marker) in event_paths
-        .iter()
-        .zip(["start-pre", "start-post", "exit-post"])
-    {
-        assert_eq!(std::fs::read_to_string(path).unwrap().trim(), marker);
-    }
+    let start_hook = std::fs::read_to_string(&event_paths[0]).unwrap();
+    let mut fields = start_hook.split_whitespace();
+    assert_eq!(fields.next(), Some("start-pre"));
+    assert_eq!(fields.next(), Some("Start"));
+    assert_eq!(fields.next(), Some("Pre"));
+    assert_eq!(fields.next(), Some("START"));
+    assert_eq!(fields.next(), Some("20000"));
+    let command_line = fields.collect::<Vec<_>>().join(" ");
+    assert!(command_line.contains("cmd.exe"));
+    assert!(command_line.contains("/c exit 0"));
+    assert_eq!(
+        std::fs::read_to_string(&event_paths[1]).unwrap().trim(),
+        "start-post"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&event_paths[2]).unwrap().trim(),
+        "exit-post"
+    );
 }
 
 #[test]

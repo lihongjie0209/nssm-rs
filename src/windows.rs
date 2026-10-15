@@ -54,7 +54,7 @@ struct ManagedChild {
 struct LogDestination {
     path: String,
     sharing: u32,
-    disposition: u32,
+    disposition: AtomicU32,
     attributes: u32,
     file: Mutex<Option<File>>,
 }
@@ -67,7 +67,7 @@ impl LogDestination {
         Ok(Arc::new(Self {
             path,
             sharing,
-            disposition,
+            disposition: AtomicU32::new(disposition),
             attributes,
             file: Mutex::new(Some(file)),
         }))
@@ -144,7 +144,8 @@ impl LogDestination {
         } else {
             drop(file_guard.take());
             if let Err(error) = fs::rename(&self.path, &rotated) {
-                *file_guard = Some(self.reopen().map_err(|reopen| {
+                self.disposition.store(4, Ordering::SeqCst);
+                *file_guard = Some(self.reopen(4).map_err(|reopen| {
                     format!(
                         "unable to move {}: {error}; reopen failed: {reopen}",
                         self.path
@@ -152,21 +153,24 @@ impl LogDestination {
                 })?);
                 return Err(format!("unable to move {}: {error}", self.path));
             }
-            *file_guard = Some(self.reopen().map_err(|error| {
-                format!("unable to reopen {} after rotation: {error}", self.path)
-            })?);
+            *file_guard = Some(
+                self.reopen(self.disposition.load(Ordering::SeqCst))
+                    .map_err(|error| {
+                        format!("unable to reopen {} after rotation: {error}", self.path)
+                    })?,
+            );
         }
         Ok(true)
     }
 
-    fn reopen(&self) -> io::Result<File> {
+    fn reopen(&self, disposition: u32) -> io::Result<File> {
         let mut options = OpenOptions::new();
         options
             .write(true)
             .append(true)
             .share_mode(self.sharing)
             .attributes(self.attributes);
-        match self.disposition {
+        match disposition {
             1 => {
                 options.create_new(true);
             }
@@ -2548,14 +2552,47 @@ fn invoke_hook(
         }
     }
     let image = std::env::current_exe().map_err(|error| error.to_string())?;
+    let application = read_optional_reg_string(service, "Application")?.unwrap_or_default();
+    let parameters = read_optional_reg_string(service, "AppParameters")?.unwrap_or_default();
+    let application_command_line = if parameters.is_empty() {
+        quote_windows_arg(&application)
+    } else {
+        format!("{} {parameters}", quote_windows_arg(&application))
+    };
+    let trigger = match event {
+        "Start" => "START",
+        "Stop" => "STOP",
+        "Rotate" => "ROTATE",
+        "Power" => "POWEREVENT",
+        _ => "",
+    };
+    let deadline = if matches!((event, action), ("Start", "Pre") | ("Stop", "Pre")) {
+        "20000"
+    } else {
+        "60000"
+    };
     command
         .env("NSSM_HOOK_VERSION", "1")
-        .env("NSSM_HOOK_EVENT", event)
-        .env("NSSM_HOOK_ACTION", action)
+        .env("NSSM_EVENT", event)
+        .env("NSSM_ACTION", action)
+        .env("NSSM_TRIGGER", trigger)
+        .env("NSSM_CONFIGURATION", "64-bit")
+        .env(
+            "NSSM_BUILD_DATE",
+            option_env!("NSSM_BUILD_DATE").unwrap_or(""),
+        )
         .env("NSSM_SERVICE_NAME", service)
+        .env("NSSM_SERVICE_DISPLAYNAME", "")
         .env("NSSM_EXE", image)
         .env("NSSM_VERSION", nssm_r::VERSION)
         .env("NSSM_PID", std::process::id().to_string())
+        .env("NSSM_LAST_CONTROL", "")
+        .env("NSSM_START_REQUESTED_COUNT", "")
+        .env("NSSM_START_COUNT", "")
+        .env("NSSM_THROTTLE_COUNT", "")
+        .env("NSSM_EXIT_COUNT", "")
+        .env("NSSM_RUNTIME", "")
+        .env("NSSM_APPLICATION_RUNTIME", "")
         .env(
             "NSSM_APPLICATION_PID",
             app_pid.map_or_else(String::new, |pid| pid.to_string()),
@@ -2564,8 +2601,8 @@ fn invoke_hook(
             "NSSM_EXITCODE",
             exit_code.map_or_else(String::new, |code| code.to_string()),
         )
-        .env("NSSM_COMMAND_LINE", command_line)
-        .env("NSSM_DEADLINE", "30000");
+        .env("NSSM_COMMAND_LINE", application_command_line)
+        .env("NSSM_DEADLINE", deadline);
     if read_reg_dword(service, "AppRedirectHook", 0)? != 0 {
         let stdout = open_stdio_file(service, "AppStdout", child_environment, false)?;
         let stderr = open_stdio_file(service, "AppStderr", child_environment, false)?;
