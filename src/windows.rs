@@ -112,7 +112,7 @@ impl LogDestination {
         ) {
             return Ok(false);
         }
-        let rotated = rotated_log_path(Path::new(&self.path), modified)
+        let rotated = rotated_log_path(Path::new(&self.path), std::time::SystemTime::now())
             .ok_or_else(|| format!("could not create rotated name for {}", self.path))?;
         file_guard
             .as_mut()
@@ -128,9 +128,14 @@ impl LogDestination {
                     rotated.display()
                 )
             })?;
+            drop(file_guard);
             if !delay.is_zero() {
                 thread::sleep(delay);
             }
+            let mut file_guard = self
+                .file
+                .lock()
+                .map_err(|_| "log destination lock poisoned".to_owned())?;
             file_guard
                 .as_mut()
                 .expect("log file remains open while copy-truncating")
@@ -146,9 +151,6 @@ impl LogDestination {
                     )
                 })?);
                 return Err(format!("unable to move {}: {error}", self.path));
-            }
-            if !delay.is_zero() {
-                thread::sleep(delay);
             }
             *file_guard = Some(self.reopen().map_err(|error| {
                 format!("unable to reopen {} after rotation: {error}", self.path)
