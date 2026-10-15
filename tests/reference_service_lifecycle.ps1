@@ -132,7 +132,11 @@ for ($index = 0; $index -lt $referenceResults.Count; $index++) {
         $reference.ExitCode -ne $candidate.ExitCode -or
         $reference.Stdout -cne $candidate.Stdout -or
         $reference.Stderr -cne $candidate.Stderr) {
-        throw "Lifecycle mismatch at $($reference.Label): reference exit=$($reference.ExitCode), candidate exit=$($candidate.ExitCode)"
+        $referenceStdout = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($reference.Stdout))
+        $candidateStdout = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($candidate.Stdout))
+        $referenceStderr = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($reference.Stderr))
+        $candidateStderr = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($candidate.Stderr))
+        throw "Lifecycle mismatch at $($reference.Label): reference exit=$($reference.ExitCode), candidate exit=$($candidate.ExitCode)`nReference stdout: [$referenceStdout]`nCandidate stdout: [$candidateStdout]`nReference stderr: [$referenceStderr]`nCandidate stderr: [$candidateStderr]"
     }
     Write-Host "$($reference.Label): match (exit $($reference.ExitCode))"
 }
