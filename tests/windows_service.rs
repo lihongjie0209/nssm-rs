@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 use std::{
+    os::windows::io::AsRawHandle,
     process::{Command, Output},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -22,6 +23,25 @@ fn wait_for_service_state(service: &str, expected: &str) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     false
+}
+
+fn file_identity(path: &str) -> (u32, u64) {
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let file = std::fs::File::open(path).expect("log file opens for identity query");
+    let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    assert_ne!(
+        unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, information.as_mut_ptr()) },
+        0,
+        "Windows returns log file identity"
+    );
+    let information = unsafe { information.assume_init() };
+    (
+        information.dwVolumeSerialNumber,
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+    )
 }
 
 fn unique_service_name() -> String {
@@ -738,9 +758,7 @@ fn verify_live_rotation(copy_and_truncate: bool) {
         thread::sleep(Duration::from_millis(100));
     }
     assert!(has_output, "child did not write its initial output");
-    let original_created = std::fs::metadata(&log_path)
-        .and_then(|metadata| metadata.created())
-        .expect("active log has a creation timestamp");
+    let original_file_identity = file_identity(&log_path);
     thread::sleep(Duration::from_millis(1100));
     let rotated = cli(&["rotate", &service]);
     assert!(
@@ -784,11 +802,9 @@ fn verify_live_rotation(copy_and_truncate: bool) {
         resumed,
         "application output did not resume after live rotation"
     );
-    let current_created = std::fs::metadata(&log_path)
-        .and_then(|metadata| metadata.created())
-        .expect("active log remains present after rotation");
+    let current_file_identity = file_identity(&log_path);
     assert_eq!(
-        current_created == original_created,
+        current_file_identity == original_file_identity,
         copy_and_truncate,
         "live rotation did not preserve the expected active file identity"
     );
