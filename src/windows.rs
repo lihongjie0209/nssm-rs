@@ -543,6 +543,14 @@ enum PowerHookAction {
     Resume,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PowerHookInvocation {
+    action: PowerHookAction,
+    control: u32,
+    synchronous: bool,
+    cancel_on_stop: bool,
+}
+
 impl PowerHookAction {
     fn hook_action(self) -> &'static str {
         match self {
@@ -558,6 +566,15 @@ fn power_hook_action(event_type: u32) -> Option<PowerHookAction> {
         PBT_APMPOWERSTATUSCHANGE => Some(PowerHookAction::Change),
         _ => None,
     }
+}
+
+fn power_hook_invocation(event_type: u32) -> Option<PowerHookInvocation> {
+    Some(PowerHookInvocation {
+        action: power_hook_action(event_type)?,
+        control: SERVICE_CONTROL_POWEREVENT,
+        synchronous: false,
+        cancel_on_stop: false,
+    })
 }
 
 fn parse_u32(value: &str) -> Result<u32, String> {
@@ -3287,13 +3304,13 @@ unsafe extern "system" fn service_handler(
             ROTATE_REQUESTED.store(true, Ordering::SeqCst);
         }
         SERVICE_CONTROL_POWEREVENT => {
-            let Some(action) = power_hook_action(event_type) else {
+            let Some(invocation) = power_hook_invocation(event_type) else {
                 report_service_control(&wide_pointer(context.cast()), control, false);
                 return NO_ERROR;
             };
-            HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
+            HOOK_LAST_CONTROL.store(invocation.control, Ordering::SeqCst);
             let service_name = wide_pointer(context.cast());
-            report_service_control(&service_name, control, true);
+            report_service_control(&service_name, invocation.control, true);
             let child_environment = SERVICE_CHILD_ENVIRONMENT
                 .lock()
                 .map(|environment| environment.clone())
@@ -3305,12 +3322,12 @@ unsafe extern "system" fn service_handler(
             let _ = invoke_hook(
                 &service_name,
                 "Power",
-                action.hook_action(),
+                invocation.action.hook_action(),
                 &child_environment,
                 app_pid,
                 None,
-                false,
-                false,
+                invocation.synchronous,
+                invocation.cancel_on_stop,
             );
         }
         SERVICE_CONTROL_CONTINUE => {
@@ -4328,9 +4345,10 @@ mod tests {
     use super::{
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
         EVENT_SERVICE_CONTROL_UNKNOWN, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        PowerHookAction, SERVICE_CONTROL_PAUSE, elevation_arguments, elevation_parameters,
-        hook_deadline_ms, parse_u32, power_hook_action, priority_name, priority_value,
-        process_belongs_to_service_lifetime, quote_dump_arg, service_control_event, valid_hook,
+        PowerHookAction, PowerHookInvocation, SERVICE_CONTROL_PAUSE, elevation_arguments,
+        elevation_parameters, hook_deadline_ms, parse_u32, power_hook_action,
+        power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
+        quote_dump_arg, service_control_event, valid_hook,
     };
 
     #[test]
@@ -4403,6 +4421,29 @@ mod tests {
         assert_eq!(power_hook_action(4), None);
         assert_eq!(power_hook_action(7), None);
         assert_eq!(power_hook_action(0xffff), None);
+    }
+
+    #[test]
+    fn power_hook_dispatch_uses_the_scm_control_and_nssm_async_policy() {
+        assert_eq!(
+            power_hook_invocation(PBT_APMPOWERSTATUSCHANGE),
+            Some(PowerHookInvocation {
+                action: PowerHookAction::Change,
+                control: windows_sys::Win32::System::Services::SERVICE_CONTROL_POWEREVENT,
+                synchronous: false,
+                cancel_on_stop: false,
+            })
+        );
+        assert_eq!(
+            power_hook_invocation(PBT_APMRESUMEAUTOMATIC),
+            Some(PowerHookInvocation {
+                action: PowerHookAction::Resume,
+                control: windows_sys::Win32::System::Services::SERVICE_CONTROL_POWEREVENT,
+                synchronous: false,
+                cancel_on_stop: false,
+            })
+        );
+        assert_eq!(power_hook_invocation(7), None);
     }
 
     #[test]

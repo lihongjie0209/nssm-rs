@@ -154,9 +154,11 @@ documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
 Rotate/Pre/Post and verify the configured working directory. Supported Power
 events map to Change/Resume hooks and are dispatched from the SCM callback;
 NSSM launches these hook processes asynchronously, and nssm-rs now does the
-same. Windows unit tests cover event mapping and hook names; injecting real OS
-power broadcasts into a running service and comparing the full Power hook ABI
-context remain unverified. A service launch
+same. Windows unit tests cover event mapping, SCM control code, hook names and
+async dispatch policy. Windows `ControlService` does not expose
+`SERVICE_CONTROL_POWEREVENT` as a caller-sendable control, so injecting a real
+power broadcast into a service still requires an OS power event; actual system
+delivery and the full Power hook ABI context remain unverified. A service launch
 integration test also copies the child fixture under a Unicode executable path,
 passes Unicode arguments containing spaces, quotes, trailing backslashes, and an
 empty argument, then checks the child's exact received argument list. Another
