@@ -42,6 +42,7 @@ static SERVICE_STATUS_HANDLE_VALUE: AtomicIsize = AtomicIsize::new(0);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_ENABLED: AtomicBool = AtomicBool::new(false);
+static CONTINUE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static POWER_HOOK_REQUESTED: AtomicU32 = AtomicU32::new(0);
 static HOOK_START_REQUESTED_COUNT: AtomicU32 = AtomicU32::new(0);
 static HOOK_START_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -2730,10 +2731,17 @@ fn set_status(state: u32, exit_code: u32, wait_hint: u32) {
     let status = SERVICE_STATUS {
         dwServiceType: SERVICE_WIN32_OWN_PROCESS,
         dwCurrentState: state,
-        dwControlsAccepted: if state == SERVICE_RUNNING {
-            SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT
-        } else {
-            0
+        dwControlsAccepted: match state {
+            SERVICE_RUNNING => {
+                SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT
+            }
+            SERVICE_PAUSED | SERVICE_CONTINUE_PENDING => {
+                SERVICE_ACCEPT_STOP
+                    | SERVICE_ACCEPT_SHUTDOWN
+                    | SERVICE_ACCEPT_POWEREVENT
+                    | SERVICE_ACCEPT_PAUSE_CONTINUE
+            }
+            _ => 0,
         },
         dwWin32ExitCode: exit_code,
         dwServiceSpecificExitCode: 0,
@@ -2773,6 +2781,13 @@ unsafe extern "system" fn service_handler(
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
             POWER_HOOK_REQUESTED.store(hook, Ordering::SeqCst);
         }
+        SERVICE_CONTROL_CONTINUE => {
+            HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
+            HOOK_THROTTLE_COUNT.store(0, Ordering::SeqCst);
+            CONTINUE_REQUESTED.store(true, Ordering::SeqCst);
+            set_status(SERVICE_CONTINUE_PENDING, 0, 10_000);
+        }
+        SERVICE_CONTROL_PAUSE => return 120,
         SERVICE_CONTROL_INTERROGATE => {}
         _ => return 120,
     }
@@ -2795,6 +2810,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name_ptr, len) });
     STOP_REQUESTED.store(false, Ordering::SeqCst);
     POWER_HOOK_REQUESTED.store(0, Ordering::SeqCst);
+    CONTINUE_REQUESTED.store(false, Ordering::SeqCst);
     HOOK_START_REQUESTED_COUNT.store(0, Ordering::SeqCst);
     HOOK_START_COUNT.store(0, Ordering::SeqCst);
     HOOK_EXIT_COUNT.store(0, Ordering::SeqCst);
@@ -2894,6 +2910,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     let mut stop_hook_invoked = false;
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
         HOOK_START_REQUESTED_COUNT.fetch_add(1, Ordering::SeqCst);
+        set_status(SERVICE_START_PENDING, 0, 10_000);
         if rotate_files {
             for (path, copy) in [
                 (stdout_path.as_deref(), stdout_copy_and_truncate),
@@ -3341,12 +3358,21 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         }
         let delay = throttle.after_exit();
         HOOK_THROTTLE_COUNT.store(throttle.counter(), Ordering::SeqCst);
-        let chunks = delay / 100;
-        for _ in 0..chunks {
-            if STOP_REQUESTED.load(Ordering::SeqCst) {
-                break;
+        if delay > 0 {
+            CONTINUE_REQUESTED.store(false, Ordering::SeqCst);
+            set_status(SERVICE_PAUSED, 0, delay);
+            let deadline = Instant::now() + Duration::from_millis(delay as u64);
+            while !STOP_REQUESTED.load(Ordering::SeqCst) && Instant::now() < deadline {
+                if CONTINUE_REQUESTED.swap(false, Ordering::SeqCst) {
+                    throttle.mark_stable();
+                    HOOK_THROTTLE_COUNT.store(0, Ordering::SeqCst);
+                    break;
+                }
+                thread::sleep(
+                    Duration::from_millis(25)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
-            thread::sleep(Duration::from_millis(100));
         }
     }
     if STOP_REQUESTED.load(Ordering::SeqCst) && !stop_hook_invoked {

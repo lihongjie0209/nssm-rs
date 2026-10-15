@@ -681,6 +681,44 @@ fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
 }
 
 #[test]
+fn continue_interrupts_restart_throttle_and_pause_is_rejected() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let ping = format!("{windows}\\System32\\PING.EXE");
+    let installed = cli(&["install", &service, &ping, "-n", "2", "127.0.0.1"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppRestartDelay", "10000"])
+            .status
+            .success()
+    );
+    assert!(cli(&["start", &service]).status.success());
+    assert!(
+        wait_for_service_state(&service, "SERVICE_PAUSED"),
+        "service did not enter the NSSM restart-throttle paused state"
+    );
+    assert!(
+        !cli(&["pause", &service]).status.success(),
+        "NSSM should reject Pause while paused for restart throttling"
+    );
+    let continued = cli(&["continue", &service]);
+    assert!(
+        continued.status.success(),
+        "continue failed: {}",
+        String::from_utf8_lossy(&continued.stderr)
+    );
+    assert!(
+        wait_for_service_state(&service, "SERVICE_RUNNING"),
+        "service did not return to running after Continue"
+    );
+}
+
+#[test]
 fn startup_rotation_preserves_existing_log_and_creates_a_fresh_active_file() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
