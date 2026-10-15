@@ -94,6 +94,30 @@ function Assert-SettingValue($Result, [string] $Expected, [string] $Label) {
     }
 }
 
+function Compare-StringSetting([System.Collections.Generic.List[object]] $Results,
+    [string] $Binary, [string] $Service, [string] $Name, [string] $Value,
+    [string] $Default, [string] $Subparameter = '') {
+    $setArguments = @('set', $Service, $Name)
+    $getArguments = @('get', $Service, $Name)
+    $resetArguments = @('reset', $Service, $Name)
+    if ($Subparameter) {
+        $setArguments += $Subparameter
+        $getArguments += $Subparameter
+        $resetArguments += $Subparameter
+    }
+    $setArguments += $Value
+    Add-Result $Results $Binary "set $Name" $setArguments | Out-Null
+    $configured = Add-Result $Results $Binary "get $Name" $getArguments
+    if ($null -ne $Default) {
+        Assert-SettingValue $configured $Value "get $Name"
+    }
+    Add-Result $Results $Binary "reset $Name" $resetArguments | Out-Null
+    $reset = Add-Result $Results $Binary "get reset $Name" $getArguments
+    if ($null -ne $Default) {
+        Assert-SettingValue $reset $Default "get reset $Name"
+    }
+}
+
 function Run-Scenario([string] $Binary, [string] $Service, [string] $Application) {
     $results = [System.Collections.Generic.List[object]]::new()
     Add-Result $results $Binary 'install' @('install', $Service, $Application, '-t', '127.0.0.1') | Out-Null
@@ -147,6 +171,19 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
             @('get', $Service, $setting.Name)
         Assert-SettingValue $reset $setting.Default "get default $($setting.Name)"
     }
+    $temporary = $env:TEMP
+    foreach ($setting in @(
+        @{ Name = 'AppParameters'; Value = '--label "two words"'; Default = '' },
+        @{ Name = 'AppDirectory'; Value = $temporary; Default = '' },
+        @{ Name = 'AppStdin'; Value = (Join-Path $temporary "$Service stdin.txt"); Default = '' },
+        @{ Name = 'AppStdout'; Value = (Join-Path $temporary "$Service stdout.txt"); Default = '' },
+        @{ Name = 'AppStderr'; Value = (Join-Path $temporary "$Service stderr.txt"); Default = '' },
+        @{ Name = 'AppAffinity'; Value = '0'; Default = 'All' }
+    )) {
+        Compare-StringSetting $results $Binary $Service $setting.Name $setting.Value $setting.Default
+    }
+    Compare-StringSetting $results $Binary $Service 'AppExit' 'Ignore' 'Restart' '23'
+    Compare-StringSetting $results $Binary $Service 'AppEvents' 'cmd.exe /c exit 0' $null 'Start/Pre'
     Add-Result $results $Binary 'start' @('start', $Service) | Out-Null
     Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
     Add-Result $results $Binary 'status running' @('status', $Service) | Out-Null
