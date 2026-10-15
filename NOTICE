@@ -2,4 +2,5 @@ This project is an independent Rust reimplementation of the command-line behavio
 
 Reference project: https://github.com/ONLYOFFICE/nssm
 Upstream documentation describes NSSM as public domain: https://nssm.cc/download
-No upstream source files are included in this repository.
+The Windows Event Log message templates in event_messages.mc are adapted from
+the public-domain NSSM source tree at the reference project URL.

@@ -28,7 +28,16 @@ use windows_sys::Win32::{
     System::Console::{
         AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
     },
-    System::{Diagnostics::ToolHelp::*, JobObjects::*, Registry::*, Services::*, Threading::*},
+    System::{
+        Diagnostics::ToolHelp::*,
+        EventLog::{
+            DeregisterEventSource, EVENTLOG_ERROR_TYPE, RegisterEventSourceW, ReportEventW,
+        },
+        JobObjects::*,
+        Registry::*,
+        Services::*,
+        Threading::*,
+    },
     UI::WindowsAndMessaging::{
         EnumWindows, GetWindowThreadProcessId, PostThreadMessageW, SMTO_ABORTIFHUNG,
         SendMessageTimeoutW, WM_CLOSE, WM_QUIT,
@@ -37,6 +46,8 @@ use windows_sys::Win32::{
 
 const DELETE_ACCESS: u32 = 0x0001_0000;
 const STOP_SKIP_CONSOLE: u32 = 1;
+const EVENT_CREATEPROCESS_FAILED: u32 = 0xc000_03f2;
+const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
 static SERVICE_STATUS_HANDLE_VALUE: AtomicIsize = AtomicIsize::new(0);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -1617,6 +1628,103 @@ fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
 
+fn ensure_event_source() -> Result<(), String> {
+    let registry_path = wide(OsStr::new(&format!(
+        "SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\{EVENT_SOURCE}"
+    )));
+    let mut key = ptr::null_mut();
+    let code = unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            registry_path.as_ptr(),
+            0,
+            ptr::null_mut(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            ptr::null(),
+            &mut key,
+            ptr::null_mut(),
+        )
+    };
+    if code != 0 {
+        return Err(registry_error(code));
+    }
+
+    let result = (|| {
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let message_file = wide(executable.as_os_str());
+        let message_file_name = wide(OsStr::new("EventMessageFile"));
+        let code = unsafe {
+            RegSetValueExW(
+                key,
+                message_file_name.as_ptr(),
+                0,
+                REG_SZ,
+                message_file.as_ptr().cast(),
+                (message_file.len() * std::mem::size_of::<u16>()) as u32,
+            )
+        };
+        if code != 0 {
+            return Err(registry_error(code));
+        }
+        let types_name = wide(OsStr::new("TypesSupported"));
+        let types_supported = u32::from(EVENTLOG_ERROR_TYPE)
+            | u32::from(windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE)
+            | u32::from(windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE);
+        let code = unsafe {
+            RegSetValueExW(
+                key,
+                types_name.as_ptr(),
+                0,
+                REG_DWORD,
+                (&types_supported as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+            )
+        };
+        if code != 0 {
+            return Err(registry_error(code));
+        }
+        Ok(())
+    })();
+    unsafe { RegCloseKey(key) };
+    result
+}
+
+fn report_event(event_type: u16, event_id: u32, values: &[&str]) {
+    let source = wide(OsStr::new(EVENT_SOURCE));
+    let handle = unsafe { RegisterEventSourceW(ptr::null(), source.as_ptr()) };
+    if handle.is_null() {
+        return;
+    }
+    let strings = values
+        .iter()
+        .map(|value| {
+            value
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let string_pointers = strings
+        .iter()
+        .map(|value| value.as_ptr())
+        .collect::<Vec<_>>();
+    unsafe {
+        ReportEventW(
+            handle,
+            event_type,
+            0,
+            event_id,
+            ptr::null_mut(),
+            string_pointers.len().min(u16::MAX as usize) as u16,
+            0,
+            string_pointers.as_ptr(),
+            ptr::null(),
+        );
+        DeregisterEventSource(handle);
+    }
+}
+
 struct ScHandle(SC_HANDLE);
 impl Drop for ScHandle {
     fn drop(&mut self) {
@@ -3110,7 +3218,13 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         }
         let mut process = match command.spawn() {
             Ok(process) => process,
-            Err(_) => {
+            Err(error) => {
+                let error = error.to_string();
+                report_event(
+                    EVENTLOG_ERROR_TYPE,
+                    EVENT_CREATEPROCESS_FAILED,
+                    &[&service_name, &app, &error],
+                );
                 set_status(SERVICE_STOPPED, 2, 0);
                 return;
             }
@@ -3429,6 +3543,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
 }
 
 pub fn run_service(name: &str) -> Result<(), String> {
+    let _ = ensure_event_source();
     let service_name = wide(OsStr::new(name));
     let table = [
         SERVICE_TABLE_ENTRYW {
@@ -3448,6 +3563,7 @@ pub fn run_service(name: &str) -> Result<(), String> {
 }
 
 pub fn execute(command: Command) -> Result<(), String> {
+    let _ = ensure_event_source();
     match command {
         Command::Install {
             service,
