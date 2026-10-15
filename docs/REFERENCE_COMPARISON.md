@@ -31,6 +31,7 @@ It is a partial report, not the command-by-command release acceptance report.
 | `get Spooler Type` | Both exited 0 and returned the same service type. |
 | `get Spooler DisplayName` | Both exited 0 and returned the same display name. |
 | `get Spooler ObjectName` | Both exited 0 and returned the same account name. |
+| `get Schedule AppRotateBytes` | Both exited 1 with empty stdout and the same diagnostic: `Parameter "AppRotateBytes" is only valid for services managed by NSSM!`. nssm-rs now identifies native services before looking up managed settings; a Windows integration regression test covers this path. |
 | `get Spooler DependOnService` | Both returned `RPCSS` and `http` in the same order. The reference emits `CR CR LF` between items and CRLF at the end; nssm-rs now reproduces those exact line-ending bytes for all CLI multi-string reads. |
 | `set/get AppAffinity` | Directly compared on the same Windows host: `0-1` reads back as `0,1`; `0,1,2` reads back as `0-2`; `Default`, `All`, and `*` each read back as `All`. nssm-rs matches the reference output and exit status for these values. |
 | `set/get AppAffinity 0-64` | Both binaries accept this range and read it back as `0-63` on the pinned x64 reference build. The reference parser checks the range start but not its end; nssm-rs reproduces the observed x64 result with explicit wrapping mask logic. A standalone CPU index `64` is rejected by both; both return exit code 6 and preserve the prior setting. |

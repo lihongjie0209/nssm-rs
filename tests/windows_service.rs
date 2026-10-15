@@ -764,12 +764,24 @@ fn string_settings_round_trip_unicode_spaces_and_reset_values() {
             String::from_utf8_lossy(&reset.stderr)
         );
         let queried = cli(&["get", &service, setting]);
-        assert!(queried.status.success(), "get reset {setting} failed");
+        assert!(
+            queried.status.success(),
+            "get reset {setting} failed: {}",
+            String::from_utf8_lossy(&queried.stderr)
+        );
         assert_eq!(
             String::from_utf8_lossy(&queried.stdout).trim(),
             expected_default,
             "reset {setting} did not restore its default"
         );
+        if setting == "Application" {
+            let other_setting = cli(&["get", &service, "AppRotateBytes"]);
+            assert!(
+                other_setting.status.success(),
+                "resetting Application changed service classification: {}",
+                String::from_utf8_lossy(&other_setting.stderr)
+            );
+        }
     }
 }
 
@@ -803,6 +815,17 @@ fn missing_service_commands_return_nssm_service_lookup_status() {
             arguments[0]
         );
     }
+}
+
+#[test]
+fn managed_settings_on_native_services_return_nssm_compatibility_error() {
+    let result = cli(&["get", "Schedule", "AppRotateBytes"]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("Parameter \"AppRotateBytes\" is only valid for services managed by NSSM!")
+    );
 }
 
 #[test]

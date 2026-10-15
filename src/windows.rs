@@ -1929,6 +1929,34 @@ fn service_is_missing(name: &str) -> bool {
     missing
 }
 
+fn is_nssm_service(name: &str) -> bool {
+    if read_optional_reg_string(name, "Application")
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return true;
+    }
+    let Ok(handle) = open_service(name, SERVICE_QUERY_CONFIG) else {
+        return false;
+    };
+    let Ok((storage, config)) = query_service_config(handle.0) else {
+        return false;
+    };
+    let _keep_storage_alive = storage;
+    let image_path = wide_pointer(config.lpBinaryPathName);
+    let Some(executable) = split_windows_args(&image_path).first().cloned() else {
+        return false;
+    };
+    Path::new(&executable)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| {
+            let name = name.to_ascii_lowercase();
+            name == "nssm.exe" || (name.starts_with("nssm-rs") && name.ends_with(".exe"))
+        })
+}
+
 fn known_setting(parameter: &str) -> bool {
     managed_setting(parameter).is_some()
         || [
@@ -4127,6 +4155,52 @@ pub fn execute(command: Command) -> Result<u8, String> {
     {
         return Ok(elevate(&arguments));
     }
+    let service = match &command {
+        Command::Start(service)
+        | Command::Stop(service)
+        | Command::Restart(service)
+        | Command::Pause(service)
+        | Command::Continue(service)
+        | Command::Status(service)
+        | Command::Rotate(service)
+        | Command::Get { service, .. }
+        | Command::Set { service, .. }
+        | Command::Reset { service, .. }
+        | Command::Unset { service, .. }
+        | Command::Remove { service, .. }
+        | Command::Dump { service, .. } => Some(service.as_str()),
+        Command::Processes(services) => services.first().map(String::as_str),
+        Command::Install { .. }
+        | Command::List { .. }
+        | Command::StatusCode(_)
+        | Command::Help
+        | Command::Version => None,
+    };
+    if let Some(service) = service.filter(|service| service_is_missing(service)) {
+        eprintln!("nssm-rs: service '{service}' does not exist\r");
+        return Ok(3);
+    }
+    let managed_parameter = match &command {
+        Command::Get {
+            service, parameter, ..
+        }
+        | Command::Set {
+            service, parameter, ..
+        }
+        | Command::Reset {
+            service, parameter, ..
+        }
+        | Command::Unset {
+            service, parameter, ..
+        } if managed_setting(parameter).is_some() => Some((service.as_str(), parameter.as_str())),
+        _ => None,
+    };
+    if let Some((service, parameter)) = managed_parameter
+        && !is_nssm_service(service)
+    {
+        eprintln!("Parameter \"{parameter}\" is only valid for services managed by NSSM!\r");
+        return Ok(1);
+    }
     match command {
         Command::StatusCode(name) => status_code(&name),
         Command::Set {
@@ -4142,11 +4216,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 eprintln!("nssm-rs: {error}\r");
                 return Ok(3);
             }
-            if read_optional_reg_string(&service, "Application")
-                .ok()
-                .flatten()
-                .is_none()
-            {
+            if !is_nssm_service(&service) {
                 eprintln!("nssm-rs: AppAffinity is only valid for nssm-rs services\r");
                 return Ok(1);
             }
@@ -4158,78 +4228,47 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 }
             }
         }
-        command => {
-            let service = match &command {
-                Command::Start(service)
-                | Command::Stop(service)
-                | Command::Restart(service)
-                | Command::Pause(service)
-                | Command::Continue(service)
-                | Command::Status(service)
-                | Command::Rotate(service)
-                | Command::Get { service, .. }
-                | Command::Set { service, .. }
-                | Command::Reset { service, .. }
-                | Command::Unset { service, .. }
-                | Command::Remove { service, .. }
-                | Command::Dump { service, .. } => Some(service.as_str()),
-                Command::Processes(services) => services.first().map(String::as_str),
-                Command::Install { .. }
-                | Command::List { .. }
-                | Command::StatusCode(_)
-                | Command::Help
-                | Command::Version => None,
-            };
-            if let Some(service) = service.filter(|service| service_is_missing(service)) {
-                eprintln!("nssm-rs: service '{service}' does not exist\r");
-                return Ok(3);
+        command => match command {
+            Command::Get {
+                service,
+                parameter,
+                extra,
+            } if known_setting(&parameter) => match get_setting(&service, &parameter, &extra) {
+                Ok(()) => Ok(0),
+                Err(error) => {
+                    eprintln!("nssm-rs: {error}\r");
+                    Ok(5)
+                }
+            },
+            Command::Set {
+                service,
+                parameter,
+                values,
+            } if known_setting(&parameter) => match set_setting(&service, &parameter, &values) {
+                Ok(()) => Ok(0),
+                Err(error) => {
+                    eprintln!("nssm-rs: {error}\r");
+                    Ok(6)
+                }
+            },
+            Command::Reset {
+                service,
+                parameter,
+                extra,
             }
-            match command {
-                Command::Get {
-                    service,
-                    parameter,
-                    extra,
-                } if known_setting(&parameter) => match get_setting(&service, &parameter, &extra) {
-                    Ok(()) => Ok(0),
-                    Err(error) => {
-                        eprintln!("nssm-rs: {error}\r");
-                        Ok(5)
-                    }
-                },
-                Command::Set {
-                    service,
-                    parameter,
-                    values,
-                } if known_setting(&parameter) => {
-                    match set_setting(&service, &parameter, &values) {
-                        Ok(()) => Ok(0),
-                        Err(error) => {
-                            eprintln!("nssm-rs: {error}\r");
-                            Ok(6)
-                        }
-                    }
+            | Command::Unset {
+                service,
+                parameter,
+                extra,
+            } if known_setting(&parameter) => match reset_setting(&service, &parameter, &extra) {
+                Ok(()) => Ok(0),
+                Err(error) => {
+                    eprintln!("nssm-rs: {error}\r");
+                    Ok(6)
                 }
-                Command::Reset {
-                    service,
-                    parameter,
-                    extra,
-                }
-                | Command::Unset {
-                    service,
-                    parameter,
-                    extra,
-                } if known_setting(&parameter) => {
-                    match reset_setting(&service, &parameter, &extra) {
-                        Ok(()) => Ok(0),
-                        Err(error) => {
-                            eprintln!("nssm-rs: {error}\r");
-                            Ok(6)
-                        }
-                    }
-                }
-                command => execute_service_command(command).map(|()| 0),
-            }
-        }
+            },
+            command => execute_service_command(command).map(|()| 0),
+        },
     }
 }
 
