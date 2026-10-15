@@ -1683,10 +1683,7 @@ fn reset_native_setting(service: &str, parameter: &str, extra: &[String]) -> Res
         "displayname" => set_native_setting(service, parameter, &[]),
         "objectname" => set_native_setting(service, parameter, &["LocalSystem".into()]),
         "environment" => set_native_setting(service, parameter, &[]),
-        "dependongroup" | "dependonservice" => {
-            let _handle = open_service(service, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG)?;
-            Ok(())
-        }
+        "dependongroup" | "dependonservice" => reset_native_dependencies(service, parameter),
         "imagepath" | "start" | "type" | "name" => {
             let parameter = canonical_setting_name(parameter);
             let service = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());
@@ -1698,6 +1695,51 @@ fn reset_native_setting(service: &str, parameter: &str, extra: &[String]) -> Res
             let _ = extra;
             Err(format!("unsupported setting: {parameter}"))
         }
+    }
+}
+
+fn reset_native_dependencies(service: &str, parameter: &str) -> Result<(), String> {
+    let handle = open_service(service, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG)?;
+    let (_, config) = query_service_config(handle.0)?;
+    let dependencies = unsafe { dependency_list(config.lpDependencies) };
+    let services = if parameter.eq_ignore_ascii_case("DependOnService") {
+        Vec::new()
+    } else {
+        dependencies
+            .iter()
+            .filter(|item| !item.starts_with('+'))
+            .cloned()
+            .collect()
+    };
+    let groups = if parameter.eq_ignore_ascii_case("DependOnGroup") {
+        Vec::new()
+    } else {
+        dependencies
+            .iter()
+            .filter(|item| item.starts_with('+'))
+            .cloned()
+            .collect()
+    };
+    let block = dependency_block(&services, &groups);
+    let changed = unsafe {
+        ChangeServiceConfigW(
+            handle.0,
+            SERVICE_NO_CHANGE,
+            SERVICE_NO_CHANGE,
+            SERVICE_NO_CHANGE,
+            ptr::null(),
+            ptr::null(),
+            ptr::null_mut(),
+            block.as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+        )
+    } != 0;
+    if changed {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error().to_string())
     }
 }
 
