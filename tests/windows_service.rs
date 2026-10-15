@@ -514,8 +514,8 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     let group_dependency_after_reset = cli(&["get", &service, "DependOnGroup"]);
     assert_eq!(
         String::from_utf8_lossy(&group_dependency_after_reset.stdout).trim(),
-        "",
-        "reset clears load-order group dependencies"
+        "+NetworkProvider",
+        "NSSM reset leaves load-order group dependencies unchanged"
     );
 
     let managed = cli(&["list"]);

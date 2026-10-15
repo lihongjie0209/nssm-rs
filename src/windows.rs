@@ -1683,7 +1683,11 @@ fn reset_native_setting(service: &str, parameter: &str, extra: &[String]) -> Res
         "displayname" => set_native_setting(service, parameter, &[]),
         "objectname" => set_native_setting(service, parameter, &["LocalSystem".into()]),
         "environment" => set_native_setting(service, parameter, &[]),
-        "dependongroup" | "dependonservice" => reset_native_dependencies(service, parameter),
+        "dependongroup" => {
+            let _handle = open_service(service, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG)?;
+            Ok(())
+        }
+        "dependonservice" => reset_native_dependencies(service, parameter),
         "imagepath" | "start" | "type" | "name" => {
             let parameter = canonical_setting_name(parameter);
             let service = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());

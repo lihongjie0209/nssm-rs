@@ -141,7 +141,8 @@ The SCM lifecycle integration also changes a built-in account alias through
 `ObjectName` and validates `Start` by reading back its real SCM value.
 It exercises service dependencies through replacement, addition, removal and
 reset against the SCM configuration, verifies that a service-dependency reset
-preserves group dependencies, and verifies group-dependency set/read/reset.
+clears service dependencies while preserving group dependencies, and verifies
+that group-dependency reset leaves groups unchanged as NSSM does.
 Another Windows integration test round-trips and resets Application,
 AppParameters, AppDirectory, AppStdin, AppStdout and AppStderr, including a
 Unicode directory and paths containing spaces. The environment integration

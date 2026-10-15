@@ -209,7 +209,7 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     foreach ($setting in @(
         @{ Name = 'DisplayName'; Value = "$Service reference display name"; Default = $Service },
         @{ Name = 'ObjectName'; Value = 'SYSTEM'; Expected = 'LocalSystem'; Default = 'LocalSystem' },
-        @{ Name = 'DependOnGroup'; Value = '+NetworkProvider'; Default = '' },
+        @{ Name = 'DependOnGroup'; Value = '+NetworkProvider'; Default = $null },
         @{ Name = 'DependOnService'; Value = 'RpcSs'; Default = '' }
     )) {
         Compare-StringSetting $results $Binary $Service $setting.Name `
