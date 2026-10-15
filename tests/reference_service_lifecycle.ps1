@@ -87,6 +87,13 @@ function Wait-ServiceState([string] $Binary, [string] $Service, [string] $State)
     throw "Service $Service did not reach $State"
 }
 
+function Assert-SettingValue($Result, [string] $Expected, [string] $Label) {
+    $actual = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($Result.Stdout)).Trim()
+    if ($actual -cne $Expected) {
+        throw "$Label returned [$actual], expected [$Expected]"
+    }
+}
+
 function Run-Scenario([string] $Binary, [string] $Service, [string] $Application) {
     $results = [System.Collections.Generic.List[object]]::new()
     Add-Result $results $Binary 'install' @('install', $Service, $Application, '-t', '127.0.0.1') | Out-Null
@@ -98,10 +105,48 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     Add-Result $results $Binary 'get Description' @('get', $Service, 'Description') | Out-Null
     Add-Result $results $Binary 'reset Description' @('reset', $Service, 'Description') | Out-Null
     Add-Result $results $Binary 'get reset Description' @('get', $Service, 'Description') | Out-Null
-    Add-Result $results $Binary 'set AppThrottle' @('set', $Service, 'appthrottle', '7000') | Out-Null
-    Add-Result $results $Binary 'get AppThrottle' @('get', $Service, 'AppThrottle') | Out-Null
-    Add-Result $results $Binary 'set AppThrottle default' @('set', $Service, 'AppThrottle', '1500') | Out-Null
-    Add-Result $results $Binary 'get default AppThrottle' @('get', $Service, 'AppThrottle') | Out-Null
+    $dwordSettings = @(
+        @{ Name = 'AppNoConsole'; Value = '1'; Expected = '1'; Default = '0' },
+        @{ Name = 'AppPriority'; Value = 'HIGH_PRIORITY_CLASS'; Expected = 'HIGH_PRIORITY_CLASS'; Default = 'NORMAL_PRIORITY_CLASS' },
+        @{ Name = 'AppRestartDelay'; Value = '321'; Expected = '321'; Default = '0' },
+        @{ Name = 'AppStdinShareMode'; Value = '3'; Expected = '3'; Default = '2' },
+        @{ Name = 'AppStdinCreationDisposition'; Value = '2'; Expected = '2'; Default = '3' },
+        @{ Name = 'AppStdinFlagsAndAttributes'; Value = '256'; Expected = '256'; Default = '128' },
+        @{ Name = 'AppStdoutShareMode'; Value = '2'; Expected = '2'; Default = '3' },
+        @{ Name = 'AppStdoutCreationDisposition'; Value = '3'; Expected = '3'; Default = '4' },
+        @{ Name = 'AppStdoutFlagsAndAttributes'; Value = '256'; Expected = '256'; Default = '128' },
+        @{ Name = 'AppStdoutCopyAndTruncate'; Value = '1'; Expected = '1'; Default = '0' },
+        @{ Name = 'AppStderrShareMode'; Value = '2'; Expected = '2'; Default = '3' },
+        @{ Name = 'AppStderrCreationDisposition'; Value = '3'; Expected = '3'; Default = '4' },
+        @{ Name = 'AppStderrFlagsAndAttributes'; Value = '256'; Expected = '256'; Default = '128' },
+        @{ Name = 'AppStderrCopyAndTruncate'; Value = '1'; Expected = '1'; Default = '0' },
+        @{ Name = 'AppStopMethodSkip'; Value = '7'; Expected = '7'; Default = '0' },
+        @{ Name = 'AppStopMethodConsole'; Value = '321'; Expected = '321'; Default = '1500' },
+        @{ Name = 'AppStopMethodWindow'; Value = '321'; Expected = '321'; Default = '1500' },
+        @{ Name = 'AppStopMethodThreads'; Value = '321'; Expected = '321'; Default = '1500' },
+        @{ Name = 'AppKillProcessTree'; Value = '0'; Expected = '0'; Default = '1' },
+        @{ Name = 'AppThrottle'; Value = '321'; Expected = '321'; Default = '1500' },
+        @{ Name = 'AppRedirectHook'; Value = '1'; Expected = '1'; Default = '0' },
+        @{ Name = 'AppRotateFiles'; Value = '1'; Expected = '1'; Default = '0' },
+        @{ Name = 'AppRotateOnline'; Value = '1'; Expected = '1'; Default = '0' },
+        @{ Name = 'AppRotateSeconds'; Value = '321'; Expected = '321'; Default = '0' },
+        @{ Name = 'AppRotateBytes'; Value = '1234'; Expected = '1234'; Default = '0' },
+        @{ Name = 'AppRotateBytesHigh'; Value = '2'; Expected = '2'; Default = '0' },
+        @{ Name = 'AppRotateDelay'; Value = '321'; Expected = '321'; Default = '0' },
+        @{ Name = 'AppTimestampLog'; Value = '1'; Expected = '1'; Default = '0' }
+    )
+    foreach ($setting in $dwordSettings) {
+        Add-Result $results $Binary "set $($setting.Name)" `
+            @('set', $Service, $setting.Name, $setting.Value) | Out-Null
+        $configured = Add-Result $results $Binary "get $($setting.Name)" `
+            @('get', $Service, $setting.Name)
+        Assert-SettingValue $configured $setting.Expected "get $($setting.Name)"
+        Add-Result $results $Binary "reset $($setting.Name)" `
+            @('reset', $Service, $setting.Name) | Out-Null
+        $reset = Add-Result $results $Binary "get default $($setting.Name)" `
+            @('get', $Service, $setting.Name)
+        Assert-SettingValue $reset $setting.Default "get default $($setting.Name)"
+    }
     Add-Result $results $Binary 'start' @('start', $Service) | Out-Null
     Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
     Add-Result $results $Binary 'status running' @('status', $Service) | Out-Null
