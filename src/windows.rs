@@ -221,6 +221,19 @@ static CHILD_PROCESS: Mutex<Option<ManagedChild>> = Mutex::new(None);
 static SERVICE_CHILD_ENVIRONMENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static ASYNC_HOOKS: Mutex<Vec<Child>> = Mutex::new(Vec::new());
 
+const NATIVE_SETTING_NAMES: &[&str] = &[
+    "DependOnGroup",
+    "DependOnService",
+    "Description",
+    "DisplayName",
+    "Environment",
+    "ImagePath",
+    "ObjectName",
+    "Name",
+    "Start",
+    "Type",
+];
+
 struct ManagedChild {
     child: Child,
     job: isize,
@@ -2390,20 +2403,19 @@ fn is_nssm_service(name: &str) -> bool {
 
 fn known_setting(parameter: &str) -> bool {
     managed_setting(parameter).is_some()
-        || [
-            "DependOnGroup",
-            "DependOnService",
-            "Description",
-            "DisplayName",
-            "Environment",
-            "ImagePath",
-            "Name",
-            "ObjectName",
-            "Start",
-            "Type",
-        ]
-        .iter()
-        .any(|name| parameter.eq_ignore_ascii_case(name))
+        || NATIVE_SETTING_NAMES
+            .iter()
+            .any(|name| parameter.eq_ignore_ascii_case(name))
+}
+
+fn print_invalid_parameter(parameter: &str) {
+    cli_eprintln!("Invalid parameter \"{parameter}\".  Valid parameters are:\r\r");
+    for setting in MANAGED_SETTINGS {
+        cli_eprintln!("{}\r", setting.name);
+    }
+    for setting in NATIVE_SETTING_NAMES {
+        cli_eprintln!("{setting}\r");
+    }
 }
 
 fn state(service: SC_HANDLE) -> Result<u32, String> {
@@ -5138,6 +5150,21 @@ pub fn execute(command: Command) -> Result<u8, String> {
     {
         print_open_service_error(&error);
         return Ok(3);
+    }
+    let invalid_parameter = match &command {
+        Command::Get { parameter, .. }
+        | Command::Set { parameter, .. }
+        | Command::Reset { parameter, .. }
+        | Command::Unset { parameter, .. }
+            if !known_setting(parameter) =>
+        {
+            Some(parameter.as_str())
+        }
+        _ => None,
+    };
+    if let Some(parameter) = invalid_parameter {
+        print_invalid_parameter(parameter);
+        return Ok(1);
     }
     let managed_parameter = match &command {
         Command::Get {

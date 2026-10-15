@@ -26,6 +26,23 @@ fn no_arguments_print_usage_to_stderr_and_return_usage_exit_status() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("Usage: nssm-rs"));
 }
 
+#[cfg(windows)]
+#[test]
+fn unknown_native_service_setting_lists_supported_parameters() {
+    let result = run(&["get", "Schedule", "DefinitelyNotASetting"]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.starts_with(
+            "Invalid parameter \"DefinitelyNotASetting\".  Valid parameters are:\r\r\n"
+        )
+    );
+    assert!(stderr.contains("Application\r\n"));
+    assert!(stderr.contains("DependOnGroup\r\n"));
+    assert!(stderr.ends_with("Type\r\n"));
+}
+
 #[cfg(not(windows))]
 #[test]
 fn service_operation_on_unsupported_host_fails_without_claiming_success() {

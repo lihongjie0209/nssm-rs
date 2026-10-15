@@ -27,17 +27,53 @@ $cases = @(
     @{ Name = 'get Schedule Start'; Args = @('get', 'Schedule', 'Start') },
     @{ Name = 'get Schedule Type'; Args = @('get', 'Schedule', 'Type') },
     @{ Name = 'get Schedule Type with ignored trailing argument'; Args = @('get', 'Schedule', 'Type', 'ignored') },
+    @{ Name = 'get Schedule Name'; Args = @('get', 'Schedule', 'Name') },
+    @{ Name = 'get Schedule ImagePath'; Args = @('get', 'Schedule', 'ImagePath') },
+    @{ Name = 'get Task Scheduler Start by display name'; Args = @('get', 'Task Scheduler', 'Start') },
+    @{ Name = 'get Task Scheduler Name by display name'; Args = @('get', 'Task Scheduler', 'Name') },
+    @{ Name = 'get Spooler DependOnService'; Args = @('get', 'Spooler', 'DependOnService') },
+    @{ Name = 'get missing service'; Args = @('get', 'NssmRDefinitelyMissingService', 'Start') },
     @{ Name = 'case-insensitive GET'; Args = @('GET', 'Spooler', 'Start') },
     @{ Name = 'status Spooler'; Args = @('STATUS', 'Spooler') },
-    @{ Name = 'statuscode Spooler'; Args = @('STATUSCODE', 'Spooler') }
+    @{ Name = 'statuscode Spooler'; Args = @('STATUSCODE', 'Spooler') },
+    @{ Name = 'status missing service'; Args = @('status', 'NssmRDefinitelyMissingService') },
+    @{ Name = 'unknown setting on native service'; Args = @('get', 'Spooler', 'DefinitelyNotASetting') }
 )
 
+function Quote-WindowsArgument([string] $Argument) {
+    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+    $quoted = '"'
+    $slashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $slashes++
+            continue
+        }
+        if ($character -eq '"') {
+            $quoted += ('\' * (2 * $slashes + 1)) + '"'
+        } else {
+            $quoted += ('\' * $slashes) + $character
+        }
+        $slashes = 0
+    }
+    return $quoted + ('\' * (2 * $slashes)) + '"'
+}
+
 function Invoke-ReadOnlyCase([string] $Binary, [string[]] $Arguments) {
-    $output = @(& $Binary @Arguments 2>&1 | ForEach-Object { [string] $_ })
-    $exitCode = $LASTEXITCODE
+    $stdoutPath = [IO.Path]::GetTempFileName()
+    $stderrPath = [IO.Path]::GetTempFileName()
+    $argumentLine = ($Arguments | ForEach-Object { Quote-WindowsArgument $_ }) -join ' '
+    $process = Start-Process -FilePath $Binary -ArgumentList $argumentLine -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $stdout = [Convert]::ToBase64String([IO.File]::ReadAllBytes($stdoutPath))
+    $stderr = [Convert]::ToBase64String([IO.File]::ReadAllBytes($stderrPath))
+    Remove-Item $stdoutPath, $stderrPath
     return [pscustomobject]@{
-        ExitCode = $exitCode
-        Output = $output -join "`n"
+        ExitCode = $process.ExitCode
+        Stdout = $stdout
+        Stderr = $stderr
     }
 }
 
@@ -46,12 +82,15 @@ foreach ($case in $cases) {
     $reference = Invoke-ReadOnlyCase $ReferenceBinary $case.Args
     $candidate = Invoke-ReadOnlyCase $CandidateBinary $case.Args
     $matches = $reference.ExitCode -eq $candidate.ExitCode -and
-        $reference.Output -ceq $candidate.Output
+        $reference.Stdout -ceq $candidate.Stdout -and
+        $reference.Stderr -ceq $candidate.Stderr
     '{0}: {1} (exit {2}/{3})' -f $case.Name, $(if ($matches) { 'match' } else { 'DIFFERENCE' }), $reference.ExitCode, $candidate.ExitCode
     if (-not $matches) {
         $differences++
-        "  reference: $($reference.Output)"
-        "  candidate: $($candidate.Output)"
+        "  reference stdout: $([Text.Encoding]::Default.GetString([Convert]::FromBase64String($reference.Stdout)))"
+        "  candidate stdout: $([Text.Encoding]::Default.GetString([Convert]::FromBase64String($candidate.Stdout)))"
+        "  reference stderr: $([Text.Encoding]::Default.GetString([Convert]::FromBase64String($reference.Stderr)))"
+        "  candidate stderr: $([Text.Encoding]::Default.GetString([Convert]::FromBase64String($candidate.Stderr)))"
     }
 }
 
