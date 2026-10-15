@@ -64,6 +64,14 @@ $cases = @(
     @{ Name = 'unknown setting on native service'; Args = @('get', 'Spooler', 'DefinitelyNotASetting') }
 )
 
+# Version output names each executable, so compare its command contract instead
+# of requiring the reference and candidate identity strings to match.
+foreach ($versionSwitch in @(
+    'version', '/version', '/VERSION', '-v', '-V', '-version', '-VERSION', '--version', '--VERSION'
+)) {
+    $cases += @{ Name = "version switch $versionSwitch"; Args = @($versionSwitch); VersionCommand = $true }
+}
+
 # Query every managed setting against a native service. This exercises NSSM's
 # per-setting native-service rejection path without changing machine state.
 $managedSettings = @(
@@ -131,9 +139,15 @@ $differences = 0
 foreach ($case in $cases) {
     $reference = Invoke-ReadOnlyCase $ReferenceBinary $case.Args
     $candidate = Invoke-ReadOnlyCase $CandidateBinary $case.Args
-    $matches = $reference.ExitCode -eq $candidate.ExitCode -and
-        $reference.Stdout -ceq $candidate.Stdout -and
-        $reference.Stderr -ceq $candidate.Stderr
+    if ($case.VersionCommand) {
+        $matches = $reference.ExitCode -eq 0 -and $candidate.ExitCode -eq 0 -and
+            $reference.Stdout -and $candidate.Stdout -and
+            -not $reference.Stderr -and -not $candidate.Stderr
+    } else {
+        $matches = $reference.ExitCode -eq $candidate.ExitCode -and
+            $reference.Stdout -ceq $candidate.Stdout -and
+            $reference.Stderr -ceq $candidate.Stderr
+    }
     '{0}: {1} (exit {2}/{3})' -f $case.Name, $(if ($matches) { 'match' } else { 'DIFFERENCE' }), $reference.ExitCode, $candidate.ExitCode
     if (-not $matches) {
         $differences++
