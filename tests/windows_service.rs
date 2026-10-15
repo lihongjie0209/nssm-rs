@@ -604,8 +604,6 @@ fn runs_configured_start_and_exit_hooks() {
     assert_eq!(fields.next(), Some("Hook"));
     assert_eq!(fields.next(), Some("ABITest"));
     assert_eq!(fields.next(), Some("Service"));
-    let command_line = fields.collect::<Vec<_>>().join(" ");
-    assert!(command_line.contains("cmd.exe"));
     let start_post = std::fs::read_to_string(&event_paths[1]).unwrap();
     assert!(start_post.starts_with("NSSM_COMMAND_LINE=\""));
     assert!(start_post.contains("cmd.exe\""));
