@@ -2401,12 +2401,20 @@ fn open_manager(access: u32) -> Result<ScHandle, String> {
 }
 
 fn open_service(name: &str, access: u32) -> Result<ScHandle, String> {
-    let canonical_name = canonical_service_name(name).map_err(|error| error.to_string())?;
-    let manager = open_manager(SC_MANAGER_CONNECT)?;
+    open_service_handle(name, access).map_err(|error| error.to_string())
+}
+
+fn open_service_handle(name: &str, access: u32) -> Result<ScHandle, io::Error> {
+    let canonical_name = canonical_service_name(name)?;
+    let manager = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        return Err(io::Error::last_os_error());
+    }
     let name = wide(OsStr::new(&canonical_name));
-    let h = unsafe { OpenServiceW(manager.0, name.as_ptr(), access) };
+    let h = unsafe { OpenServiceW(manager, name.as_ptr(), access) };
+    unsafe { CloseServiceHandle(manager) };
     if h.is_null() {
-        Err(io::Error::last_os_error().to_string())
+        Err(io::Error::last_os_error())
     } else {
         Ok(ScHandle(h))
     }
@@ -2732,6 +2740,67 @@ fn print_control_success(service: &str, control: u32) {
     );
 }
 
+fn print_control_failure(service: &str, control: u32, error: &io::Error) {
+    cli_eprintln!(
+        "{}: {}: {}\r\r",
+        service,
+        control_name(control),
+        windows_error_message(error)
+    );
+}
+
+fn run_service_control_command(service: &str, control: u32) -> u8 {
+    let service_name = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());
+    let access = match control {
+        0 => SERVICE_START | SERVICE_QUERY_STATUS,
+        SERVICE_CONTROL_STOP => SERVICE_STOP | SERVICE_QUERY_STATUS,
+        SERVICE_CONTROL_PAUSE | SERVICE_CONTROL_CONTINUE => {
+            SERVICE_PAUSE_CONTINUE | SERVICE_QUERY_STATUS
+        }
+        128 => SERVICE_USER_DEFINED_CONTROL,
+        _ => return 1,
+    };
+    let handle = match open_service_handle(service, access) {
+        Ok(handle) => handle,
+        Err(error) => {
+            print_open_service_error(&error);
+            return 3;
+        }
+    };
+
+    let mut status = SERVICE_STATUS::default();
+    let succeeded = if control == 0 {
+        unsafe { StartServiceW(handle.0, 0, ptr::null()) }
+    } else {
+        unsafe { ControlService(handle.0, control, &mut status) }
+    };
+    if succeeded == 0 {
+        let error = io::Error::last_os_error();
+        print_control_failure(&service_name, control, &error);
+        return if control == SERVICE_CONTROL_STOP && error.raw_os_error() == Some(1062) {
+            0
+        } else {
+            1
+        };
+    }
+
+    if control != 128 {
+        let expected = match control {
+            0 => SERVICE_RUNNING,
+            SERVICE_CONTROL_STOP => SERVICE_STOPPED,
+            SERVICE_CONTROL_PAUSE => SERVICE_PAUSED,
+            SERVICE_CONTROL_CONTINUE => SERVICE_RUNNING,
+            _ => return 1,
+        };
+        if let Err(error) = wait_state(handle.0, expected) {
+            cli_eprintln!("nssm-rs: {error}\r");
+            return 1;
+        }
+    }
+    print_control_success(&service_name, control);
+    0
+}
+
 fn wait_state(service: SC_HANDLE, expected: u32) -> Result<(), String> {
     for _ in 0..300 {
         let current = state(service)?;
@@ -2762,10 +2831,7 @@ fn remove(name: &str, confirmed: bool) -> Result<(), String> {
             return Err("removal cancelled".into());
         }
     }
-    let service = open_service(name, DELETE_ACCESS | SERVICE_STOP | SERVICE_QUERY_STATUS)?;
-    if state(service.0)? != SERVICE_STOPPED {
-        stop(name)?;
-    }
+    let service = open_service(name, DELETE_ACCESS)?;
     if unsafe { DeleteService(service.0) } == 0 {
         return Err(io::Error::last_os_error().to_string());
     }
@@ -6174,6 +6240,26 @@ pub fn execute(command: Command) -> Result<u8, String> {
                     Ok(6)
                 }
             },
+            Command::Start(service) => Ok(run_service_control_command(&service, 0)),
+            Command::Stop(service) => {
+                Ok(run_service_control_command(&service, SERVICE_CONTROL_STOP))
+            }
+            Command::Restart(service) => {
+                let stopped = run_service_control_command(&service, SERVICE_CONTROL_STOP);
+                if stopped != 0 {
+                    Ok(stopped)
+                } else {
+                    Ok(run_service_control_command(&service, 0))
+                }
+            }
+            Command::Pause(service) => {
+                Ok(run_service_control_command(&service, SERVICE_CONTROL_PAUSE))
+            }
+            Command::Continue(service) => Ok(run_service_control_command(
+                &service,
+                SERVICE_CONTROL_CONTINUE,
+            )),
+            Command::Rotate(service) => Ok(run_service_control_command(&service, 128)),
             command => execute_service_command(command).map(|()| 0),
         },
     }

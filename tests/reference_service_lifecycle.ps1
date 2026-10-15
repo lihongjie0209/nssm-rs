@@ -101,9 +101,11 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     Add-Result $results $Binary 'start' @('start', $Service) | Out-Null
     Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
     Add-Result $results $Binary 'status running' @('status', $Service) | Out-Null
+    Add-Result $results $Binary 'start already running' @('start', $Service) @(1) | Out-Null
     Add-Result $results $Binary 'stop' @('stop', $Service) | Out-Null
     Wait-ServiceState $Binary $Service 'SERVICE_STOPPED'
     Add-Result $results $Binary 'status stopped' @('status', $Service) | Out-Null
+    Add-Result $results $Binary 'stop already stopped' @('stop', $Service) | Out-Null
     Add-Result $results $Binary 'remove' @('remove', $Service, 'confirm') | Out-Null
     return ,$results.ToArray()
 }
