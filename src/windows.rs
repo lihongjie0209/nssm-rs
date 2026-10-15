@@ -3169,6 +3169,73 @@ fn hook_trigger(event: &str, control: u32) -> &'static str {
     }
 }
 
+struct HookAbiContext<'a> {
+    event: &'a str,
+    action: &'a str,
+    trigger: &'a str,
+    configuration: &'a str,
+    build_date: &'a str,
+    service: &'a str,
+    display_name: &'a str,
+    executable: &'a str,
+    version: &'a str,
+    pid: u32,
+    last_control: &'a str,
+    start_requested_count: u32,
+    start_count: u32,
+    throttle_count: u32,
+    exit_count: u32,
+    runtime: &'a str,
+    application_runtime: &'a str,
+    application_pid: Option<u32>,
+    exit_code: Option<u32>,
+    command_line: &'a str,
+    deadline: u64,
+}
+
+fn hook_abi_environment(context: HookAbiContext<'_>) -> Vec<(&'static str, String)> {
+    vec![
+        ("NSSM_HOOK_VERSION", "1".to_owned()),
+        ("NSSM_EVENT", context.event.to_owned()),
+        ("NSSM_ACTION", context.action.to_owned()),
+        ("NSSM_TRIGGER", context.trigger.to_owned()),
+        ("NSSM_CONFIGURATION", context.configuration.to_owned()),
+        ("NSSM_BUILD_DATE", context.build_date.to_owned()),
+        ("NSSM_SERVICE_NAME", context.service.to_owned()),
+        ("NSSM_SERVICE_DISPLAYNAME", context.display_name.to_owned()),
+        ("NSSM_EXE", context.executable.to_owned()),
+        ("NSSM_VERSION", context.version.to_owned()),
+        ("NSSM_PID", context.pid.to_string()),
+        ("NSSM_LAST_CONTROL", context.last_control.to_owned()),
+        (
+            "NSSM_START_REQUESTED_COUNT",
+            context.start_requested_count.to_string(),
+        ),
+        ("NSSM_START_COUNT", context.start_count.to_string()),
+        ("NSSM_THROTTLE_COUNT", context.throttle_count.to_string()),
+        ("NSSM_EXIT_COUNT", context.exit_count.to_string()),
+        ("NSSM_RUNTIME", context.runtime.to_owned()),
+        (
+            "NSSM_APPLICATION_RUNTIME",
+            context.application_runtime.to_owned(),
+        ),
+        (
+            "NSSM_APPLICATION_PID",
+            context
+                .application_pid
+                .map_or_else(String::new, |pid| pid.to_string()),
+        ),
+        (
+            "NSSM_EXITCODE",
+            context
+                .exit_code
+                .map_or_else(String::new, |code| code.to_string()),
+        ),
+        ("NSSM_COMMAND_LINE", context.command_line.to_owned()),
+        ("NSSM_DEADLINE", context.deadline.to_string()),
+    ]
+}
+
 fn service_control_event(control: u32, handled: bool) -> (u32, String) {
     let name = control_name(control);
     if name.is_empty() {
@@ -3226,7 +3293,10 @@ fn invoke_hook(
             command.env(key, value);
         }
     }
-    let image = std::env::current_exe().map_err(|error| error.to_string())?;
+    let image = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .to_string_lossy()
+        .into_owned();
     let application = read_optional_reg_string(service, "Application")?
         .map(|value| expand_environment_value(&value, child_environment))
         .unwrap_or_default();
@@ -3259,7 +3329,8 @@ fn invoke_hook(
     } else {
         architecture.to_owned()
     };
-    let trigger = hook_trigger(event, HOOK_LAST_CONTROL.load(Ordering::SeqCst));
+    let last_control = HOOK_LAST_CONTROL.load(Ordering::SeqCst);
+    let trigger = hook_trigger(event, last_control);
     let deadline_ms = hook_deadline_ms(event, action);
     let service_handle = open_service(service, SERVICE_QUERY_CONFIG)?;
     let (service_config_storage, service_config) = query_service_config(service_handle.0)?;
@@ -3285,52 +3356,30 @@ fn invoke_hook(
     } else {
         now.saturating_sub(service_start).to_string()
     };
-    command
-        .env("NSSM_HOOK_VERSION", "1")
-        .env("NSSM_EVENT", event)
-        .env("NSSM_ACTION", action)
-        .env("NSSM_TRIGGER", trigger)
-        .env("NSSM_CONFIGURATION", configuration)
-        .env("NSSM_BUILD_DATE", env!("NSSM_BUILD_DATE"))
-        .env("NSSM_SERVICE_NAME", service)
-        .env("NSSM_SERVICE_DISPLAYNAME", display_name)
-        .env("NSSM_EXE", image)
-        .env("NSSM_VERSION", nssm_rs::VERSION)
-        .env("NSSM_PID", std::process::id().to_string())
-        .env(
-            "NSSM_LAST_CONTROL",
-            control_name(HOOK_LAST_CONTROL.load(Ordering::SeqCst)),
-        )
-        .env(
-            "NSSM_START_REQUESTED_COUNT",
-            HOOK_START_REQUESTED_COUNT
-                .load(Ordering::SeqCst)
-                .to_string(),
-        )
-        .env(
-            "NSSM_START_COUNT",
-            HOOK_START_COUNT.load(Ordering::SeqCst).to_string(),
-        )
-        .env(
-            "NSSM_THROTTLE_COUNT",
-            HOOK_THROTTLE_COUNT.load(Ordering::SeqCst).to_string(),
-        )
-        .env(
-            "NSSM_EXIT_COUNT",
-            HOOK_EXIT_COUNT.load(Ordering::SeqCst).to_string(),
-        )
-        .env("NSSM_RUNTIME", service_runtime)
-        .env("NSSM_APPLICATION_RUNTIME", application_runtime)
-        .env(
-            "NSSM_APPLICATION_PID",
-            app_pid.map_or_else(String::new, |pid| pid.to_string()),
-        )
-        .env(
-            "NSSM_EXITCODE",
-            exit_code.map_or_else(String::new, |code| code.to_string()),
-        )
-        .env("NSSM_COMMAND_LINE", application_command_line)
-        .env("NSSM_DEADLINE", deadline_ms.to_string());
+    let hook_context = HookAbiContext {
+        event,
+        action,
+        trigger,
+        configuration: &configuration,
+        build_date: env!("NSSM_BUILD_DATE"),
+        service,
+        display_name: &display_name,
+        executable: &image,
+        version: nssm_rs::VERSION,
+        pid: std::process::id(),
+        last_control: control_name(last_control),
+        start_requested_count: HOOK_START_REQUESTED_COUNT.load(Ordering::SeqCst),
+        start_count: HOOK_START_COUNT.load(Ordering::SeqCst),
+        throttle_count: HOOK_THROTTLE_COUNT.load(Ordering::SeqCst),
+        exit_count: HOOK_EXIT_COUNT.load(Ordering::SeqCst),
+        runtime: &service_runtime,
+        application_runtime: &application_runtime,
+        application_pid: app_pid,
+        exit_code,
+        command_line: &application_command_line,
+        deadline: deadline_ms,
+    };
+    command.envs(hook_abi_environment(hook_context));
     if read_reg_dword(service, "AppRedirectHook", 0)? != 0 {
         let stdout = open_hook_stdio_file(service, "AppStdout", child_environment)?;
         let stderr = open_hook_stdio_file(service, "AppStderr", child_environment)?;
@@ -4484,11 +4533,12 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 mod tests {
     use super::{
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
-        EVENT_SERVICE_CONTROL_UNKNOWN, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        PowerHookAction, PowerHookInvocation, SERVICE_CONTROL_PAUSE, elevation_arguments,
-        elevation_parameters, hook_deadline_ms, hook_trigger, parse_u32, power_hook_action,
-        power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
-        quote_dump_arg, service_control_event, service_type_name, valid_hook,
+        EVENT_SERVICE_CONTROL_UNKNOWN, HookAbiContext, PBT_APMPOWERSTATUSCHANGE,
+        PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CONTROL_PAUSE,
+        elevation_arguments, elevation_parameters, hook_abi_environment, hook_deadline_ms,
+        hook_trigger, parse_u32, power_hook_action, power_hook_invocation, priority_name,
+        priority_value, process_belongs_to_service_lifetime, quote_dump_arg, service_control_event,
+        service_type_name, valid_hook,
     };
 
     #[test]
@@ -4608,6 +4658,67 @@ mod tests {
                 "Power hooks use the general hook deadline"
             );
         }
+    }
+
+    #[test]
+    fn power_hook_environment_matches_the_complete_nssm_abi() {
+        let actual = hook_abi_environment(HookAbiContext {
+            event: "Power",
+            action: "Resume",
+            trigger: "POWEREVENT",
+            configuration: "64-bit debug",
+            build_date: "2026-10-15",
+            service: "worker",
+            display_name: "Worker service",
+            executable: r"C:\Program Files\nssm-rs.exe",
+            version: "0.1.0",
+            pid: 42,
+            last_control: "POWEREVENT",
+            start_requested_count: 3,
+            start_count: 2,
+            throttle_count: 1,
+            exit_count: 4,
+            runtime: "123",
+            application_runtime: "45",
+            application_pid: Some(99),
+            exit_code: None,
+            command_line: r#""C:\Worker\worker.exe" --mode service"#,
+            deadline: 60_000,
+        })
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+        let expected = [
+            ("NSSM_HOOK_VERSION", "1"),
+            ("NSSM_EVENT", "Power"),
+            ("NSSM_ACTION", "Resume"),
+            ("NSSM_TRIGGER", "POWEREVENT"),
+            ("NSSM_CONFIGURATION", "64-bit debug"),
+            ("NSSM_BUILD_DATE", "2026-10-15"),
+            ("NSSM_SERVICE_NAME", "worker"),
+            ("NSSM_SERVICE_DISPLAYNAME", "Worker service"),
+            ("NSSM_EXE", r"C:\Program Files\nssm-rs.exe"),
+            ("NSSM_VERSION", "0.1.0"),
+            ("NSSM_PID", "42"),
+            ("NSSM_LAST_CONTROL", "POWEREVENT"),
+            ("NSSM_START_REQUESTED_COUNT", "3"),
+            ("NSSM_START_COUNT", "2"),
+            ("NSSM_THROTTLE_COUNT", "1"),
+            ("NSSM_EXIT_COUNT", "4"),
+            ("NSSM_RUNTIME", "123"),
+            ("NSSM_APPLICATION_RUNTIME", "45"),
+            ("NSSM_APPLICATION_PID", "99"),
+            ("NSSM_EXITCODE", ""),
+            (
+                "NSSM_COMMAND_LINE",
+                r#""C:\Worker\worker.exe" --mode service"#,
+            ),
+            ("NSSM_DEADLINE", "60000"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key, value.to_owned()))
+        .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

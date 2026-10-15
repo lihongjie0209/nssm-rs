@@ -156,10 +156,12 @@ events map to Change/Resume hooks and are dispatched from the SCM callback;
 NSSM launches these hook processes asynchronously, and nssm-rs now does the
 same. Windows unit tests cover event mapping, SCM control code, hook names and
 async dispatch policy, plus the Power hook trigger, last-control name and
-deadline values. Windows `ControlService` does not expose
+deadline values. A deterministic test checks the complete `NSSM_*` environment
+mapping used by Power hooks. Windows `ControlService` does not expose
 `SERVICE_CONTROL_POWEREVENT` as a caller-sendable control, so injecting a real
 power broadcast into a service still requires an OS power event; actual system
-delivery and the full Power hook ABI context remain unverified. A service launch
+delivery and end-to-end propagation of the Power ABI into a launched hook remain
+unverified. A service launch
 integration test also copies the child fixture under a Unicode executable path,
 passes Unicode arguments containing spaces, quotes, trailing backslashes, and an
 empty argument, then checks the child's exact received argument list. Another
@@ -167,8 +169,8 @@ service integration test queries the child process after launch and verifies
 that configured priority class and CPU affinity are effective at runtime. The
 SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
-acceptance scope includes system-level Power event delivery and hook ABI context
-parity, event-log compatibility
+acceptance scope includes system-level Power event delivery and end-to-end hook
+ABI propagation, event-log compatibility
 beyond events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1020, 1021, 1034,
 1035, 1040, 1041, 1072 and 1077,
 broader error-path coverage, and command-by-command parity against the pinned
