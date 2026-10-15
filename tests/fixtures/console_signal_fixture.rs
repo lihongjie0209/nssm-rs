@@ -142,13 +142,13 @@ fn run_window_mode(
             }
             0
         } else if message == WM_CLOSE {
-            if let Some(marker) = MARKER.get() {
-                let _ = std::fs::write(marker, b"window-close");
-            }
             if let Some(delay) = CLOSE_DELAY.get()
                 && !delay.is_zero()
             {
                 thread::sleep(*delay);
+            }
+            if let Some(marker) = MARKER.get() {
+                let _ = std::fs::write(marker, b"window-close");
             }
             unsafe { PostQuitMessage(0) };
             0
