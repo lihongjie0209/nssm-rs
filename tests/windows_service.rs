@@ -1882,7 +1882,6 @@ fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
         "install failed: {}",
         String::from_utf8_lossy(&installed.stderr)
     );
-    assert!(cli(&["set", &service, "AppThrottle", "0"]).status.success());
     assert!(
         cli(&["set", &service, "AppExit", "23", "Restart"])
             .status
@@ -1921,13 +1920,20 @@ fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
         wait_for_windows_powershell_condition(&script),
         "Application log contains event 1014 with the exit code, Restart action and executable"
     );
+    let throttle_script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1034}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq 1500 -and $event.Properties[2].Value -eq 2000) {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&throttle_script),
+        "Application log contains event 1034 with the throttle threshold and retry delay"
+    );
     let status = cli(&["status", &service]);
     let current_state = String::from_utf8_lossy(&status.stdout).trim().to_owned();
     assert!(
         status.status.success()
             && matches!(
                 current_state.as_str(),
-                "SERVICE_START_PENDING" | "SERVICE_RUNNING"
+                "SERVICE_START_PENDING" | "SERVICE_RUNNING" | "SERVICE_PAUSED"
             ),
         "service left the active restart lifecycle with state {current_state}"
     );
@@ -2099,6 +2105,14 @@ fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
         wait_for_service_state(&service, "SERVICE_PAUSED"),
         "service did not enter the NSSM restart-throttle paused state"
     );
+    let escaped_service = service.replace('\'', "''");
+    let restart_delay_script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1072}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 10000) {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&restart_delay_script),
+        "Application log contains event 1072 with the configured restart delay"
+    );
     let paused_again = cli(&["pause", &service]);
     assert!(
         paused_again.status.success(),
@@ -2119,7 +2133,6 @@ fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
         wait_for_service_state(&service, "SERVICE_RUNNING"),
         "service did not return to running after Continue"
     );
-    let escaped_service = service.replace('\'', "''");
     let event_script = format!(
         "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1035}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 1 -and $event.Properties[0].Value -eq '{escaped_service}') {{ exit 0 }} }}; exit 1"
     );

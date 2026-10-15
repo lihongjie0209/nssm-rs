@@ -56,6 +56,8 @@ const EVENT_EXIT_IGNORE: u32 = 0x4000_03f7;
 const EVENT_EXIT: u32 = 0x4000_03f8;
 const EVENT_EXIT_UNCLEAN: u32 = 0x4000_03fc;
 const EVENT_RESET_THROTTLE: u32 = 0x4000_040b;
+const EVENT_THROTTLED: u32 = 0x8000_040a;
+const EVENT_RESTART_DELAY: u32 = 0x4000_0430;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
@@ -3720,8 +3722,23 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             }
         }
         let delay = throttle.after_exit();
-        HOOK_THROTTLE_COUNT.store(throttle.counter(), Ordering::SeqCst);
+        let throttle_count = throttle.counter();
+        HOOK_THROTTLE_COUNT.store(throttle_count, Ordering::SeqCst);
         if delay > 0 {
+            let backoff_ms = nssm_rs::restart_wait_ms(throttle_count.saturating_sub(1), 0);
+            if restart_delay_ms > backoff_ms {
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                    EVENT_RESTART_DELAY,
+                    &[&service_name, &delay.to_string()],
+                );
+            } else {
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                    EVENT_THROTTLED,
+                    &[&service_name, &throttle_ms.to_string(), &delay.to_string()],
+                );
+            }
             CONTINUE_REQUESTED.store(false, Ordering::SeqCst);
             set_status(SERVICE_PAUSED, 0, delay);
             let deadline = Instant::now() + Duration::from_millis(delay as u64);
