@@ -1953,7 +1953,7 @@ fn dump_service(source: &str, target: Option<&str>) -> Result<(), (u8, String)> 
     let source = canonical_service_name(source).map_err(|error| (3, error.to_string()))?;
     let source = source.as_str();
     let _service = open_service(source, SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG)
-        .map_err(|error| (3, error))?;
+        .map_err(|error| (3, dump_open_service_error(&error)))?;
     let application = read_optional_reg_string(source, "Application")
         .map_err(|error| (4, error))?
         .unwrap_or_default();
@@ -1971,6 +1971,17 @@ fn dump_service(source: &str, target: Option<&str>) -> Result<(), (u8, String)> 
         dump_managed_settings(&executable, source, target).map_err(|error| (1, error))?;
     }
     dump_native_settings(&executable, source, target).map_err(|error| (1, error))
+}
+
+fn dump_open_service_error(error: &str) -> String {
+    if error.ends_with("(os error 5)") {
+        let system_error = windows_error_message(&io::Error::from_raw_os_error(5));
+        format!(
+            "Can't open service!\r\r\nOpenService(): {system_error}\r\r\n\r\r\nAdministrator access is needed to edit a service.\r\r\n"
+        )
+    } else {
+        error.to_owned()
+    }
 }
 impl Drop for ManagedChild {
     fn drop(&mut self) {
@@ -5137,6 +5148,10 @@ fn elevation_arguments(command: &Command) -> Option<Vec<String>> {
             }
             Some(arguments)
         }
+        Command::Dump {
+            service,
+            new_name: None,
+        } => Some(vec!["dump".to_owned(), service.clone()]),
         _ => None,
     }
 }
@@ -5312,7 +5327,11 @@ pub fn execute(command: Command) -> Result<u8, String> {
         Command::Dump { service, new_name } => match dump_service(&service, new_name.as_deref()) {
             Ok(()) => Ok(0),
             Err((code, error)) => {
-                cli_eprintln!("nssm-rs: {error}");
+                if error.starts_with("Can't open service!\r") {
+                    write_cli_output(&error, true);
+                } else {
+                    cli_eprintln!("nssm-rs: {error}");
+                }
                 Ok(code)
             }
         },
@@ -5426,13 +5445,14 @@ mod tests {
         FAIL_NEXT_PROCESS_TIMES, FAIL_NEXT_STDIO_DUPLICATE, FAIL_OPEN_PROCESS_PID,
         HOOK_LAST_APPLICATION_EXIT_CODE, HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE,
         PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT,
-        SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT, StdioFileError, duplicate_stdio_file,
-        elevation_arguments, elevation_parameters, ensure_event_source, finish_async_hooks,
-        hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger, install, parse_u32,
-        power_hook_action, power_hook_invocation, priority_name, priority_value,
-        process_belongs_to_service_lifetime, process_open_error_output, process_tree_from_root,
-        quote_dump_arg, remove, report_stdio_setup_failure, service_control_event, service_handler,
-        service_main, service_type_name, set_setting, valid_hook, wide,
+        SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT, StdioFileError, dump_open_service_error,
+        duplicate_stdio_file, elevation_arguments, elevation_parameters, ensure_event_source,
+        finish_async_hooks, hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger,
+        install, parse_u32, power_hook_action, power_hook_invocation, priority_name,
+        priority_value, process_belongs_to_service_lifetime, process_open_error_output,
+        process_tree_from_root, quote_dump_arg, remove, report_stdio_setup_failure,
+        service_control_event, service_handler, service_main, service_type_name, set_setting,
+        valid_hook, wide,
     };
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -5578,7 +5598,7 @@ mod tests {
     }
 
     #[test]
-    fn elevation_rebuilds_install_and_confirmed_remove_arguments_safely() {
+    fn elevation_rebuilds_install_remove_and_dump_arguments_safely() {
         let install = Command::Install {
             service: "worker service".into(),
             application: Some(r"C:\Program Files\worker.exe".into()),
@@ -5596,6 +5616,20 @@ mod tests {
         };
         let remove_arguments = elevation_arguments(&remove).expect("remove requests elevation");
         assert_eq!(remove_arguments, ["remove", "worker service", "confirm"]);
+
+        let dump = Command::Dump {
+            service: "Task Scheduler".into(),
+            new_name: None,
+        };
+        let dump_arguments = elevation_arguments(&dump).expect("single-service dump elevates");
+        assert_eq!(dump_arguments, ["dump", "Task Scheduler"]);
+        assert!(
+            elevation_arguments(&Command::Dump {
+                service: "Task Scheduler".into(),
+                new_name: Some("copy".into()),
+            })
+            .is_none()
+        );
 
         assert!(elevation_arguments(&Command::List { all: false }).is_none());
     }
@@ -5630,6 +5664,20 @@ mod tests {
         assert!(output.starts_with("Spooler: 5280: "));
         assert!(!output.contains("(os error 5)"));
         assert!(output.ends_with("\r\r\n\r\n"));
+    }
+
+    #[test]
+    fn dump_access_denied_matches_nssm_privilege_diagnostic() {
+        let error = dump_open_service_error("Access is denied. (os error 5)");
+        assert!(error.starts_with("Can't open service!\r\r\nOpenService(): "));
+        assert!(
+            error.ends_with("\r\r\n\r\r\nAdministrator access is needed to edit a service.\r\r\n")
+        );
+        assert!(!error.contains("os error 5"));
+        assert_eq!(
+            dump_open_service_error("unexpected failure"),
+            "unexpected failure"
+        );
     }
 
     #[test]
