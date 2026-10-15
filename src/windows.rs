@@ -1681,7 +1681,10 @@ fn reset_native_setting(service: &str, parameter: &str, extra: &[String]) -> Res
         "displayname" => set_native_setting(service, parameter, &[]),
         "objectname" => set_native_setting(service, parameter, &["LocalSystem".into()]),
         "environment" => set_native_setting(service, parameter, &[]),
-        "dependongroup" | "dependonservice" => set_native_setting(service, parameter, &[]),
+        "dependongroup" | "dependonservice" => {
+            let _handle = open_service(service, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG)?;
+            Ok(())
+        }
         "imagepath" | "start" | "type" | "name" => Err(format!("{parameter} has no reset value")),
         _ => {
             let _ = extra;

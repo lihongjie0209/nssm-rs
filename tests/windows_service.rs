@@ -495,6 +495,12 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
             .status
             .success()
     );
+    let dependency_after_reset = cli(&["get", &service, "DependOnService"]);
+    assert_eq!(
+        String::from_utf8_lossy(&dependency_after_reset.stdout).trim(),
+        "LanmanWorkstation",
+        "NSSM reset leaves service dependencies unchanged"
+    );
 
     let group_dependency = cli(&["set", &service, "DependOnGroup", "+NetworkProvider"]);
     assert!(
@@ -509,6 +515,12 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         "+NetworkProvider"
     );
     assert!(cli(&["reset", &service, "DependOnGroup"]).status.success());
+    let group_dependency_after_reset = cli(&["get", &service, "DependOnGroup"]);
+    assert_eq!(
+        String::from_utf8_lossy(&group_dependency_after_reset.stdout).trim(),
+        "+NetworkProvider",
+        "NSSM reset leaves load-order group dependencies unchanged"
+    );
 
     let managed = cli(&["list"]);
     assert!(managed.status.success());
