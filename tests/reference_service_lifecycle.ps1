@@ -96,7 +96,8 @@ function Assert-SettingValue($Result, [string] $Expected, [string] $Label) {
 
 function Compare-StringSetting([System.Collections.Generic.List[object]] $Results,
     [string] $Binary, [string] $Service, [string] $Name, [string] $Value,
-    [object] $Default, [string] $Subparameter = '', [switch] $SkipReset) {
+    [object] $Default, [string] $Subparameter = '', [switch] $SkipReset,
+    [object] $ExpectedConfiguredValue = $null) {
     $setArguments = @('set', $Service, $Name)
     $getArguments = @('get', $Service, $Name)
     $resetArguments = @('reset', $Service, $Name)
@@ -109,7 +110,8 @@ function Compare-StringSetting([System.Collections.Generic.List[object]] $Result
     Add-Result $Results $Binary "set $Name" $setArguments | Out-Null
     $configured = Add-Result $Results $Binary "get $Name" $getArguments
     if ($null -ne $Default) {
-        Assert-SettingValue $configured $Value "get $Name"
+        $expected = if ($null -eq $ExpectedConfiguredValue) { $Value } else { $ExpectedConfiguredValue }
+        Assert-SettingValue $configured $expected "get $Name"
     }
     if ($SkipReset) {
         Write-Host "Skipped reference reset $Name because pinned NSSM v2.24.1 crashes on this operation."
@@ -206,12 +208,12 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     }
     foreach ($setting in @(
         @{ Name = 'DisplayName'; Value = "$Service reference display name"; Default = $Service },
-        @{ Name = 'ObjectName'; Value = 'SYSTEM'; Default = 'LocalSystem' },
+        @{ Name = 'ObjectName'; Value = 'SYSTEM'; Expected = 'LocalSystem'; Default = 'LocalSystem' },
         @{ Name = 'DependOnGroup'; Value = '+NetworkProvider'; Default = $null },
         @{ Name = 'DependOnService'; Value = 'RpcSs'; Default = $null }
     )) {
         Compare-StringSetting $results $Binary $Service $setting.Name `
-            $setting.Value $setting.Default
+            $setting.Value $setting.Default -ExpectedConfiguredValue $setting.Expected
     }
     Add-Result $results $Binary 'set Start' `
         @('set', $Service, 'Start', 'SERVICE_AUTO_START') | Out-Null
