@@ -2194,6 +2194,53 @@ fn unavailable_affinity_bits_log_effective_mask_and_constrain_the_child() {
 }
 
 #[test]
+fn invalid_stop_method_skip_type_logs_event_and_keeps_all_stop_methods() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    assert!(
+        cli(&["install", &service, &command_prompt, "/c", "exit 0"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+
+    let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
+    let write_invalid_type = format!(
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppStopMethodSkip -PropertyType String -Value 'not-a-dword-value' -Force"
+    );
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    assert!(
+        Command::new(&powershell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &write_invalid_type
+            ])
+            .status()
+            .is_ok_and(|status| status.success()),
+        "test writes the wrong registry value type"
+    );
+
+    assert!(cli(&["start", &service]).status.success());
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    let escaped_service = service.replace('\'', "''");
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1052}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ $p = $event.Properties; if ($p.Count -eq 3 -and $p[0].Value -eq '{escaped_service}' -and $p[1].Value -eq 'AppStopMethodSkip' -and $p[2].Value -eq 'NSSM') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "event 1052 identifies the service, value, and reference product"
+    );
+}
+
+#[test]
 fn timestamp_log_prefixes_each_child_output_line_in_utc() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());

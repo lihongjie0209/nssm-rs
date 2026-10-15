@@ -102,6 +102,8 @@ const EVENT_BOGUS_AFFINITY_MASK: u32 = 0x8000_042b;
 const EVENT_EFFECTIVE_AFFINITY_MASK: u32 = 0x8000_042c;
 const EVENT_GET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0x8000_042d;
 const EVENT_SET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0xc000_042e;
+const EVENT_BOGUS_STOP_METHOD_SKIP: u32 = 0x8000_041c;
+const EVENT_QUERYVALUE_FAILED: u32 = 0xc000_03fa;
 const PRIORITY_CLASS_MASK: u32 = 0x0000_c1e0;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
@@ -3247,6 +3249,28 @@ fn read_reg_dword(service: &str, value: &str, default: u32) -> Result<u32, Strin
     Ok(data)
 }
 
+fn read_stop_method_skip(service: &str) -> u32 {
+    match read_reg_dword(service, "AppStopMethodSkip", 0) {
+        Ok(value) => value,
+        Err(error) if error.contains("AppStopMethodSkip is not a DWORD") => {
+            report_event(
+                windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                EVENT_BOGUS_STOP_METHOD_SKIP,
+                &[service, "AppStopMethodSkip", "NSSM"],
+            );
+            0
+        }
+        Err(error) => {
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_QUERYVALUE_FAILED,
+                &["AppStopMethodSkip", &error],
+            );
+            0
+        }
+    }
+}
+
 #[derive(Debug)]
 enum StdioFileError {
     Configuration,
@@ -3746,13 +3770,13 @@ fn stop_child(
     application: &str,
     child: &mut ManagedChild,
     no_console: bool,
+    skip: u32,
 ) -> Result<bool, String> {
     report_event(
         windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
         EVENT_TERMINATEPROCESS,
         &[service, application],
     );
-    let skip = read_reg_dword(service, "AppStopMethodSkip", 0)?;
     let pid = child.child.id();
     let mut tree_events_logged = false;
     for method in nssm_rs::stop_methods(skip, no_console) {
@@ -4381,6 +4405,7 @@ struct ServiceConfig {
     child_environment: Vec<String>,
     affinity: Option<String>,
     priority: u32,
+    stop_method_skip: u32,
     no_console: bool,
     kill_process_tree: bool,
 }
@@ -4544,6 +4569,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             );
             0x20
         };
+        let stop_method_skip = read_stop_method_skip(&service_name);
         let no_console = read_reg_dword(&service_name, "AppNoConsole", 0)? != 0;
         let kill_process_tree = read_reg_dword(&service_name, "AppKillProcessTree", 1)? != 0;
         Ok(ServiceConfig {
@@ -4555,6 +4581,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             child_environment,
             affinity,
             priority,
+            stop_method_skip,
             no_console,
             kill_process_tree,
         })
@@ -4568,6 +4595,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         child_environment,
         affinity,
         priority,
+        stop_method_skip,
         no_console,
         kill_process_tree,
     } = match config {
@@ -4894,10 +4922,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         } else {
             // Keep the child in the console's default process group so a
             // CTRL_C_EVENT sent with group id 0 reaches its handler.
-            if read_reg_dword(&service_name, "AppStopMethodSkip", 0).unwrap_or(0)
-                & STOP_SKIP_CONSOLE
-                == 0
-            {
+            if stop_method_skip & STOP_SKIP_CONSOLE == 0 {
                 creation_flags |= CREATE_NEW_CONSOLE;
             }
         }
@@ -5183,7 +5208,8 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             if stop_requested {
                 stop_process_handled = true;
                 tree_events_logged =
-                    stop_child(&service_name, &app, &mut proc, no_console).unwrap_or(false);
+                    stop_child(&service_name, &app, &mut proc, no_console, stop_method_skip)
+                        .unwrap_or(false);
             }
             if let Ok(status) = proc.child.wait()
                 && STOP_REQUESTED.load(Ordering::SeqCst)
