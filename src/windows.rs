@@ -3161,6 +3161,14 @@ fn control_name(control: u32) -> &'static str {
     }
 }
 
+fn hook_trigger(event: &str, control: u32) -> &'static str {
+    match event {
+        "Start" => control_name(0),
+        "Stop" | "Rotate" | "Power" => control_name(control),
+        _ => "",
+    }
+}
+
 fn service_control_event(control: u32, handled: bool) -> (u32, String) {
     let name = control_name(control);
     if name.is_empty() {
@@ -3251,11 +3259,7 @@ fn invoke_hook(
     } else {
         architecture.to_owned()
     };
-    let trigger = match event {
-        "Start" => control_name(0),
-        "Stop" | "Rotate" | "Power" => control_name(HOOK_LAST_CONTROL.load(Ordering::SeqCst)),
-        _ => "",
-    };
+    let trigger = hook_trigger(event, HOOK_LAST_CONTROL.load(Ordering::SeqCst));
     let deadline_ms = hook_deadline_ms(event, action);
     let service_handle = open_service(service, SERVICE_QUERY_CONFIG)?;
     let (service_config_storage, service_config) = query_service_config(service_handle.0)?;
@@ -4482,7 +4486,7 @@ mod tests {
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
         EVENT_SERVICE_CONTROL_UNKNOWN, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
         PowerHookAction, PowerHookInvocation, SERVICE_CONTROL_PAUSE, elevation_arguments,
-        elevation_parameters, hook_deadline_ms, parse_u32, power_hook_action,
+        elevation_parameters, hook_deadline_ms, hook_trigger, parse_u32, power_hook_action,
         power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
         quote_dump_arg, service_control_event, service_type_name, valid_hook,
     };
@@ -4586,6 +4590,24 @@ mod tests {
     fn power_hook_actions_use_nssm_hook_names() {
         assert_eq!(PowerHookAction::Change.hook_action(), "Change");
         assert_eq!(PowerHookAction::Resume.hook_action(), "Resume");
+    }
+
+    #[test]
+    fn power_hook_abi_uses_control_trigger_and_general_hook_deadline() {
+        for event_type in [PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC] {
+            let invocation = power_hook_invocation(event_type).expect("supported power event");
+            assert_eq!(hook_trigger("Power", invocation.control), "POWEREVENT");
+            assert_eq!(
+                super::control_name(invocation.control),
+                "POWEREVENT",
+                "NSSM_LAST_CONTROL is the SCM power-event name"
+            );
+            assert_eq!(
+                hook_deadline_ms("Power", invocation.action.hook_action()),
+                60_000,
+                "Power hooks use the general hook deadline"
+            );
+        }
     }
 
     #[test]
