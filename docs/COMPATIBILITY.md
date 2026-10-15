@@ -124,6 +124,9 @@ configuration readback, running state, wrapped process reporting, stop, removal
 and service disappearance. A dedicated Windows settings integration test now
 round-trips and resets all 28 managed DWORD settings against the real service
 registry, including priority name normalization and each setting's default.
+Non-administrator `install` and `remove` now request UAC elevation while
+preserving command arguments; Windows unit coverage checks safe reconstruction,
+and the full local elevated SCM integration suite passed with this change.
 The SCM lifecycle integration also changes a built-in account alias through
 `ObjectName` and validates `Start` by reading back its real SCM value.
 It exercises service dependencies through replacement, addition, removal and
