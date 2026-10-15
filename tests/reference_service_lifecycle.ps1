@@ -206,13 +206,21 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     }
     foreach ($setting in @(
         @{ Name = 'DisplayName'; Value = "$Service reference display name"; Default = $Service },
-        @{ Name = 'Start'; Value = 'SERVICE_AUTO_START'; Default = 'SERVICE_DEMAND_START' },
         @{ Name = 'Type'; Value = 'SERVICE_WIN32_OWN_PROCESS'; Default = 'SERVICE_WIN32_OWN_PROCESS' },
         @{ Name = 'DependOnService'; Value = 'RpcSs'; Default = '' }
     )) {
         Compare-StringSetting $results $Binary $Service $setting.Name `
             $setting.Value $setting.Default
     }
+    Add-Result $results $Binary 'set Start' `
+        @('set', $Service, 'Start', 'SERVICE_AUTO_START') | Out-Null
+    Add-Result $results $Binary 'get Start' @('get', $Service, 'Start') | Out-Null
+    Add-Result $results $Binary 'reset Start without default' `
+        @('reset', $Service, 'Start') @(6) | Out-Null
+    Add-Result $results $Binary 'get Start after rejected reset' `
+        @('get', $Service, 'Start') | Out-Null
+    Add-Result $results $Binary 'restore Start' `
+        @('set', $Service, 'Start', 'SERVICE_DEMAND_START') | Out-Null
     Add-Result $results $Binary 'set Environment' `
         @('set', $Service, 'Environment', '+NSSMR_NATIVE=value') | Out-Null
     $nativeEnvironmentValue = Add-Result $results $Binary 'get Environment key' `
