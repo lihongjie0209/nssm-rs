@@ -608,6 +608,11 @@ impl RestartThrottle {
         self.counter = self.counter.saturating_add(1);
         delay
     }
+
+    /// Current consecutive failure count, exposed to lifecycle hooks.
+    pub fn counter(&self) -> u32 {
+        self.counter
+    }
 }
 
 /// Apply NSSM's KEY=VALUE / +KEY=VALUE / -KEY[=VALUE] environment-block edits.

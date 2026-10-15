@@ -15,10 +15,10 @@ use std::{
     ptr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows_sys::Win32::{
     Foundation::{
@@ -43,6 +43,14 @@ static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_ENABLED: AtomicBool = AtomicBool::new(false);
 static POWER_HOOK_REQUESTED: AtomicU32 = AtomicU32::new(0);
+static HOOK_START_REQUESTED_COUNT: AtomicU32 = AtomicU32::new(0);
+static HOOK_START_COUNT: AtomicU32 = AtomicU32::new(0);
+static HOOK_EXIT_COUNT: AtomicU32 = AtomicU32::new(0);
+static HOOK_THROTTLE_COUNT: AtomicU32 = AtomicU32::new(0);
+static HOOK_LAST_CONTROL: AtomicU32 = AtomicU32::new(0);
+static HOOK_SERVICE_START_MS: AtomicU64 = AtomicU64::new(0);
+static HOOK_APPLICATION_START_MS: AtomicU64 = AtomicU64::new(0);
+static HOOK_APPLICATION_RUNTIME_MS: AtomicU64 = AtomicU64::new(0);
 static CHILD_PROCESS: Mutex<Option<ManagedChild>> = Mutex::new(None);
 static ASYNC_HOOKS: Mutex<Vec<Child>> = Mutex::new(Vec::new());
 
@@ -2524,6 +2532,28 @@ fn finish_async_hooks() {
     }
 }
 
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u64::MAX as u128) as u64
+        })
+}
+
+fn control_name(control: u32) -> &'static str {
+    match control {
+        0 => "START",
+        SERVICE_CONTROL_STOP => "STOP",
+        SERVICE_CONTROL_PAUSE => "PAUSE",
+        SERVICE_CONTROL_CONTINUE => "CONTINUE",
+        SERVICE_CONTROL_INTERROGATE => "INTERROGATE",
+        SERVICE_CONTROL_SHUTDOWN => "SHUTDOWN",
+        SERVICE_CONTROL_POWEREVENT => "POWEREVENT",
+        128 => "ROTATE",
+        _ => "",
+    }
+}
+
 fn invoke_hook(
     service: &str,
     event: &str,
@@ -2560,10 +2590,8 @@ fn invoke_hook(
         format!("{} {parameters}", quote_windows_arg(&application))
     };
     let trigger = match event {
-        "Start" => "START",
-        "Stop" => "STOP",
-        "Rotate" => "ROTATE",
-        "Power" => "POWEREVENT",
+        "Start" => control_name(0),
+        "Stop" | "Rotate" | "Power" => control_name(HOOK_LAST_CONTROL.load(Ordering::SeqCst)),
         _ => "",
     };
     let deadline = if matches!((event, action), ("Start", "Pre") | ("Stop", "Pre")) {
@@ -2575,6 +2603,26 @@ fn invoke_hook(
     let (service_config_storage, service_config) = query_service_config(service_handle.0)?;
     let _keep_service_config_storage_alive = service_config_storage;
     let display_name = wide_pointer(service_config.lpDisplayName);
+    let now = unix_time_millis();
+    let service_start = HOOK_SERVICE_START_MS.load(Ordering::SeqCst);
+    let app_start = HOOK_APPLICATION_START_MS.load(Ordering::SeqCst);
+    let application_runtime = if app_pid.is_some() && app_start != 0 {
+        now.saturating_sub(app_start)
+    } else if event == "Start" && action == "Pre" {
+        0
+    } else {
+        HOOK_APPLICATION_RUNTIME_MS.load(Ordering::SeqCst)
+    };
+    let application_runtime = if application_runtime == 0 && event == "Start" && action == "Pre" {
+        String::new()
+    } else {
+        application_runtime.to_string()
+    };
+    let service_runtime = if service_start == 0 {
+        String::new()
+    } else {
+        now.saturating_sub(service_start).to_string()
+    };
     command
         .env("NSSM_HOOK_VERSION", "1")
         .env("NSSM_EVENT", event)
@@ -2590,13 +2638,30 @@ fn invoke_hook(
         .env("NSSM_EXE", image)
         .env("NSSM_VERSION", nssm_r::VERSION)
         .env("NSSM_PID", std::process::id().to_string())
-        .env("NSSM_LAST_CONTROL", "")
-        .env("NSSM_START_REQUESTED_COUNT", "")
-        .env("NSSM_START_COUNT", "")
-        .env("NSSM_THROTTLE_COUNT", "")
-        .env("NSSM_EXIT_COUNT", "")
-        .env("NSSM_RUNTIME", "")
-        .env("NSSM_APPLICATION_RUNTIME", "")
+        .env(
+            "NSSM_LAST_CONTROL",
+            control_name(HOOK_LAST_CONTROL.load(Ordering::SeqCst)),
+        )
+        .env(
+            "NSSM_START_REQUESTED_COUNT",
+            HOOK_START_REQUESTED_COUNT
+                .load(Ordering::SeqCst)
+                .to_string(),
+        )
+        .env(
+            "NSSM_START_COUNT",
+            HOOK_START_COUNT.load(Ordering::SeqCst).to_string(),
+        )
+        .env(
+            "NSSM_THROTTLE_COUNT",
+            HOOK_THROTTLE_COUNT.load(Ordering::SeqCst).to_string(),
+        )
+        .env(
+            "NSSM_EXIT_COUNT",
+            HOOK_EXIT_COUNT.load(Ordering::SeqCst).to_string(),
+        )
+        .env("NSSM_RUNTIME", service_runtime)
+        .env("NSSM_APPLICATION_RUNTIME", application_runtime)
         .env(
             "NSSM_APPLICATION_PID",
             app_pid.map_or_else(String::new, |pid| pid.to_string()),
@@ -2682,6 +2747,7 @@ unsafe extern "system" fn service_handler(
 ) -> u32 {
     match control {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
+            HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
             STOP_REQUESTED.store(true, Ordering::SeqCst);
             set_status(SERVICE_STOP_PENDING, 0, 10_000);
         }
@@ -2689,6 +2755,7 @@ unsafe extern "system" fn service_handler(
             if !ROTATE_ENABLED.load(Ordering::SeqCst) {
                 return 120;
             }
+            HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
             ROTATE_REQUESTED.store(true, Ordering::SeqCst);
         }
         SERVICE_CONTROL_POWEREVENT => {
@@ -2697,6 +2764,7 @@ unsafe extern "system" fn service_handler(
                 10 => 1, // PBT_APMPOWERSTATUSCHANGE
                 _ => return NO_ERROR,
             };
+            HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
             POWER_HOOK_REQUESTED.store(hook, Ordering::SeqCst);
         }
         SERVICE_CONTROL_INTERROGATE => {}
@@ -2721,6 +2789,14 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name_ptr, len) });
     STOP_REQUESTED.store(false, Ordering::SeqCst);
     POWER_HOOK_REQUESTED.store(0, Ordering::SeqCst);
+    HOOK_START_REQUESTED_COUNT.store(0, Ordering::SeqCst);
+    HOOK_START_COUNT.store(0, Ordering::SeqCst);
+    HOOK_EXIT_COUNT.store(0, Ordering::SeqCst);
+    HOOK_THROTTLE_COUNT.store(0, Ordering::SeqCst);
+    HOOK_LAST_CONTROL.store(0, Ordering::SeqCst);
+    HOOK_SERVICE_START_MS.store(unix_time_millis(), Ordering::SeqCst);
+    HOOK_APPLICATION_START_MS.store(0, Ordering::SeqCst);
+    HOOK_APPLICATION_RUNTIME_MS.store(0, Ordering::SeqCst);
     let name_wide = wide(OsStr::new(&service_name));
     let handle = unsafe {
         RegisterServiceCtrlHandlerExW(name_wide.as_ptr(), Some(service_handler), ptr::null())
@@ -2811,6 +2887,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     let mut throttle = nssm_r::RestartThrottle::new(restart_delay_ms);
     let mut stop_hook_invoked = false;
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
+        HOOK_START_REQUESTED_COUNT.fetch_add(1, Ordering::SeqCst);
         if rotate_files {
             for (path, copy) in [
                 (stdout_path.as_deref(), stdout_copy_and_truncate),
@@ -3005,6 +3082,8 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         if let Ok(mut child) = CHILD_PROCESS.lock() {
             *child = Some(launched);
         }
+        HOOK_START_COUNT.fetch_add(1, Ordering::SeqCst);
+        HOOK_APPLICATION_START_MS.store(unix_time_millis(), Ordering::SeqCst);
         let app_pid = CHILD_PROCESS
             .lock()
             .ok()
@@ -3158,6 +3237,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             }
             if child_started.elapsed() >= Duration::from_millis(throttle_ms as u64) {
                 throttle.mark_stable();
+                HOOK_THROTTLE_COUNT.store(0, Ordering::SeqCst);
             }
             let exit_status = CHILD_PROCESS.lock().ok().and_then(|mut slot| {
                 slot.as_mut()
@@ -3205,12 +3285,20 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         {
             child_exit_code = 2;
         }
+        let app_start_ms = HOOK_APPLICATION_START_MS.load(Ordering::SeqCst);
+        if app_start_ms != 0 {
+            HOOK_APPLICATION_RUNTIME_MS.store(
+                unix_time_millis().saturating_sub(app_start_ms),
+                Ordering::SeqCst,
+            );
+        }
+        HOOK_EXIT_COUNT.fetch_add(1, Ordering::SeqCst);
         let _ = invoke_hook(
             &service_name,
             "Exit",
             "Post",
             &child_environment,
-            app_pid,
+            None,
             Some(child_exit_code),
             false,
             false,
@@ -3246,6 +3334,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             ExitAction::Restart => {}
         }
         let delay = throttle.after_exit();
+        HOOK_THROTTLE_COUNT.store(throttle.counter(), Ordering::SeqCst);
         let chunks = delay / 100;
         for _ in 0..chunks {
             if STOP_REQUESTED.load(Ordering::SeqCst) {

@@ -538,9 +538,9 @@ fn runs_configured_start_and_exit_hooks() {
             .success()
     );
     for ((event_action, marker), path) in [
-        ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_SERVICE_DISPLAYNAME% %NSSM_COMMAND_LINE%"),
-        ("Start/Post", "start-post"),
-        ("Exit/Post", "exit-post"),
+        ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_START_REQUESTED_COUNT% %NSSM_START_COUNT% %NSSM_EXIT_COUNT% %NSSM_THROTTLE_COUNT% %NSSM_RUNTIME% %NSSM_APPLICATION_RUNTIME% %NSSM_LAST_CONTROL% %NSSM_SERVICE_DISPLAYNAME% %NSSM_COMMAND_LINE%"),
+        ("Start/Post", "start-post %NSSM_START_REQUESTED_COUNT% %NSSM_START_COUNT%"),
+        ("Exit/Post", "exit-post %NSSM_EXIT_COUNT% %NSSM_APPLICATION_RUNTIME%"),
     ]
     .into_iter()
     .zip(&event_paths)
@@ -580,6 +580,12 @@ fn runs_configured_start_and_exit_hooks() {
     assert_eq!(fields.next(), Some("Pre"));
     assert_eq!(fields.next(), Some("START"));
     assert_eq!(fields.next(), Some("20000"));
+    assert_eq!(fields.next(), Some("1"));
+    assert_eq!(fields.next(), Some("0"));
+    assert_eq!(fields.next(), Some("0"));
+    assert_eq!(fields.next(), Some("0"));
+    assert!(fields.next().unwrap().parse::<u64>().unwrap() < 60_000);
+    assert_eq!(fields.next(), Some("START"));
     assert_eq!(fields.next(), Some("Hook"));
     assert_eq!(fields.next(), Some("ABITest"));
     assert_eq!(fields.next(), Some("Service"));
@@ -587,11 +593,17 @@ fn runs_configured_start_and_exit_hooks() {
     assert!(command_line.contains("cmd.exe"));
     assert_eq!(
         std::fs::read_to_string(&event_paths[1]).unwrap().trim(),
-        "start-post"
+        "start-post 1 1"
     );
-    assert_eq!(
-        std::fs::read_to_string(&event_paths[2]).unwrap().trim(),
-        "exit-post"
+    let exit_hook = std::fs::read_to_string(&event_paths[2]).unwrap();
+    assert!(exit_hook.trim().starts_with("exit-post 1 "));
+    assert!(
+        exit_hook
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
     );
 }
 
