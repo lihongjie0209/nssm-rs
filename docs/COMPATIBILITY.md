@@ -36,7 +36,7 @@ interface and Windows service behavior. GUI workflows are explicitly excluded.
 | Log rotation | `AppRotateFiles`, `AppRotateOnline`, `AppRotateSeconds`, low/high byte thresholds, delay, timestamping; `rotate <name>` | Boundary-size/age tests, active-file and naming assertions, integration for online rotation |
 | Environment | App environment overrides, extra environment, system/service merged environment; ordered KEY=VALUE edits and case-insensitive keys; `+`, `-`, `:` modifiers and optional single-key query | Unit tests for ordering, replacement, conditional delete, clear/reset, malformed blocks and expansion; child sees expected environment |
 | Service metadata | `Description`, `DisplayName`, `ObjectName`, `Start`, `Type`, `DependOnGroup`, `DependOnService`, `ImagePath`, `Name` | Native SCM readback, accepted enum validation, account/dependency error handling |
-| Hooks | `AppEvents <event>/<action> <command>` for service/app start, stop, rotate lifecycle and pre/post phases; hook output-handle behavior and all `NSSM_*` ABI variables | Event-order integration assertions for normal start, restart, stop, rotation, failures, and cancellation; assert the full environment ABI on real Start/Pre and Exit/Post hooks |
+| Hooks | `AppEvents <event>/<action> <command>` for service/app start, stop, rotate lifecycle and pre/post phases; hook output-handle behavior and all `NSSM_*` ABI variables | Event-order integration assertions for normal start, restart, stop, rotation, failures, and cancellation; assert the full environment ABI on real Start, Exit, Stop and Rotate hooks |
 | Discovery/reporting | `list` and `list all`; `processes <name>`; `dump <name>` and `dump <name> <newname>` | Golden output tests, quoting/escaping round-trip, process tree correctness, native-service filtering |
 | Windows process launch | Correct Windows quoting, Unicode paths/args, environment expansion, priority, CPU affinity, console/window behavior | Launch fixture with argv/environment echo, Unicode and special-character cases, priority/affinity inspection |
 | Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; currently events 1001 (dispatcher failure), 1006 (service start failure), 1008 (child started), and 1010 (child launch failure) are verified |
@@ -121,9 +121,9 @@ when CopyAndTruncate is disabled, or copies and truncates the same active file
 when enabled; Windows integration tests check backup data, continued output and
 active-file identity for both modes. The Windows suite also verifies that SCM stop reaches responding children through
 CTRL+C, WM_CLOSE and WM_QUIT before termination fallback; hook tests capture all
-documented `NSSM_*` ABI variables for Start/Pre and Exit/Post and verify the
-configured working directory. Remaining acceptance scope includes hook ABI
-context parity for Stop, Rotate and Power events, event-log compatibility
+documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
+Rotate/Pre/Post and verify the configured working directory. Remaining
+acceptance scope includes hook ABI context parity for Power events, event-log compatibility
 beyond events 1001, 1006, 1008, and 1010, broader error-path coverage, and
 command-by-command parity against the pinned reference.
 Do not call this a complete NSSM replacement or publish a stable release until

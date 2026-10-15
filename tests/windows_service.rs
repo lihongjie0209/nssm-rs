@@ -10,6 +10,48 @@ use std::{
 };
 
 static SERVICE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const HOOK_ABI_VARIABLES: [&str; 22] = [
+    "NSSM_HOOK_VERSION",
+    "NSSM_EVENT",
+    "NSSM_ACTION",
+    "NSSM_TRIGGER",
+    "NSSM_LAST_CONTROL",
+    "NSSM_EXE",
+    "NSSM_CONFIGURATION",
+    "NSSM_VERSION",
+    "NSSM_BUILD_DATE",
+    "NSSM_PID",
+    "NSSM_RUNTIME",
+    "NSSM_APPLICATION_PID",
+    "NSSM_APPLICATION_RUNTIME",
+    "NSSM_EXITCODE",
+    "NSSM_DEADLINE",
+    "NSSM_SERVICE_NAME",
+    "NSSM_SERVICE_DISPLAYNAME",
+    "NSSM_START_REQUESTED_COUNT",
+    "NSSM_START_COUNT",
+    "NSSM_EXIT_COUNT",
+    "NSSM_THROTTLE_COUNT",
+    "NSSM_COMMAND_LINE",
+];
+
+fn read_hook_environment(path: &str) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .expect("hook ABI environment was captured")
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_ascii_uppercase(), value.trim().to_owned()))
+        .collect()
+}
+
+fn assert_hook_abi_present(environment: &std::collections::HashMap<String, String>, hook: &str) {
+    for variable in HOOK_ABI_VARIABLES {
+        assert!(
+            environment.contains_key(variable),
+            "{hook} hook ABI omitted {variable}"
+        );
+    }
+}
 
 fn cli(args: &[&str]) -> Output {
     let binary = std::env::var_os("NSSM_R_TEST_BINARY")
@@ -1105,12 +1147,7 @@ fn runs_configured_start_and_exit_hooks() {
             .trim(),
         hook_working_directory
     );
-    let abi = std::fs::read_to_string(&abi_marker).expect("hook ABI environment was captured");
-    let hook_environment = abi
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(key, value)| (key.to_ascii_uppercase(), value.trim().to_owned()))
-        .collect::<std::collections::HashMap<_, _>>();
+    let hook_environment = read_hook_environment(&abi_marker);
     assert_eq!(
         hook_environment
             .get("NSSM_HOOK_VERSION")
@@ -1155,36 +1192,7 @@ fn runs_configured_start_and_exit_hooks() {
     );
     assert!(hook_environment["NSSM_PID"].parse::<u32>().unwrap() > 0);
     assert!(std::path::Path::new(&hook_environment["NSSM_EXE"]).is_file());
-    let expected_abi_variables = [
-        "NSSM_HOOK_VERSION",
-        "NSSM_EVENT",
-        "NSSM_ACTION",
-        "NSSM_TRIGGER",
-        "NSSM_LAST_CONTROL",
-        "NSSM_EXE",
-        "NSSM_CONFIGURATION",
-        "NSSM_VERSION",
-        "NSSM_BUILD_DATE",
-        "NSSM_PID",
-        "NSSM_RUNTIME",
-        "NSSM_APPLICATION_PID",
-        "NSSM_APPLICATION_RUNTIME",
-        "NSSM_EXITCODE",
-        "NSSM_DEADLINE",
-        "NSSM_SERVICE_NAME",
-        "NSSM_SERVICE_DISPLAYNAME",
-        "NSSM_START_REQUESTED_COUNT",
-        "NSSM_START_COUNT",
-        "NSSM_EXIT_COUNT",
-        "NSSM_THROTTLE_COUNT",
-        "NSSM_COMMAND_LINE",
-    ];
-    for variable in expected_abi_variables {
-        assert!(
-            hook_environment.contains_key(variable),
-            "Start/Pre hook ABI omitted {variable}"
-        );
-    }
+    assert_hook_abi_present(&hook_environment, "Start/Pre");
     let architecture = if cfg!(target_pointer_width = "64") {
         "64-bit"
     } else {
@@ -1208,19 +1216,8 @@ fn runs_configured_start_and_exit_hooks() {
     assert!(hook_environment["NSSM_RUNTIME"].parse::<u64>().is_ok());
     assert!(hook_environment["NSSM_COMMAND_LINE"].starts_with('"'));
 
-    let exit_abi =
-        std::fs::read_to_string(&exit_abi_marker).expect("Exit/Post hook ABI is captured");
-    let exit_environment = exit_abi
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(key, value)| (key.to_ascii_uppercase(), value.trim().to_owned()))
-        .collect::<std::collections::HashMap<_, _>>();
-    for variable in expected_abi_variables {
-        assert!(
-            exit_environment.contains_key(variable),
-            "Exit/Post hook ABI omitted {variable}"
-        );
-    }
+    let exit_environment = read_hook_environment(&exit_abi_marker);
+    assert_hook_abi_present(&exit_environment, "Exit/Post");
     assert_eq!(exit_environment["NSSM_EVENT"], "Exit");
     assert_eq!(exit_environment["NSSM_ACTION"], "Post");
     assert_eq!(exit_environment["NSSM_TRIGGER"], "");
@@ -1322,7 +1319,18 @@ fn rotates_and_stops_through_the_configured_hooks_in_order() {
     let ping = format!("{windows}\\System32\\PING.EXE");
     let marker_path = std::env::temp_dir().join(format!("{service}_hook_order.txt"));
     let marker_path = marker_path.to_string_lossy().into_owned();
-    let _files = FileCleanup(vec![marker_path.clone()]);
+    let rotate_pre_abi = std::env::temp_dir().join(format!("{service}_rotate_pre_abi.txt"));
+    let rotate_pre_abi = rotate_pre_abi.to_string_lossy().into_owned();
+    let rotate_post_abi = std::env::temp_dir().join(format!("{service}_rotate_post_abi.txt"));
+    let rotate_post_abi = rotate_post_abi.to_string_lossy().into_owned();
+    let stop_pre_abi = std::env::temp_dir().join(format!("{service}_stop_pre_abi.txt"));
+    let stop_pre_abi = stop_pre_abi.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![
+        marker_path.clone(),
+        rotate_pre_abi.clone(),
+        rotate_post_abi.clone(),
+        stop_pre_abi.clone(),
+    ]);
     let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
     assert!(
         installed.status.success(),
@@ -1335,12 +1343,14 @@ fn rotates_and_stops_through_the_configured_hooks_in_order() {
         "online rotation set failed: {}",
         String::from_utf8_lossy(&online_rotation.stderr)
     );
-    for (event, action) in [
-        ("Rotate/Pre", "rotate-pre"),
-        ("Rotate/Post", "rotate-post"),
-        ("Stop/Pre", "stop-pre"),
+    for (event, action, environment_path) in [
+        ("Rotate/Pre", "rotate-pre", &rotate_pre_abi),
+        ("Rotate/Post", "rotate-post", &rotate_post_abi),
+        ("Stop/Pre", "stop-pre", &stop_pre_abi),
     ] {
-        let hook = format!("cmd.exe /c echo {action}>>\"{marker_path}\"");
+        let hook = format!(
+            "cmd.exe /c echo {action}>>\"{marker_path}\"&set NSSM_ >\"{environment_path}\""
+        );
         let configured = cli(&["set", &service, "AppEvents", event, &hook]);
         assert!(
             configured.status.success(),
@@ -1389,6 +1399,42 @@ fn rotates_and_stops_through_the_configured_hooks_in_order() {
         hooks.lines().collect::<Vec<_>>(),
         ["rotate-pre", "rotate-post", "stop-pre"]
     );
+    for path in [&rotate_pre_abi, &rotate_post_abi, &stop_pre_abi] {
+        assert!(
+            std::path::Path::new(path).is_file(),
+            "missing hook ABI: {path}"
+        );
+    }
+    let rotate_pre = read_hook_environment(&rotate_pre_abi);
+    let rotate_post = read_hook_environment(&rotate_post_abi);
+    let stop_pre = read_hook_environment(&stop_pre_abi);
+    assert_hook_abi_present(&rotate_pre, "Rotate/Pre");
+    assert_hook_abi_present(&rotate_post, "Rotate/Post");
+    assert_hook_abi_present(&stop_pre, "Stop/Pre");
+    for environment in [&rotate_pre, &rotate_post] {
+        assert_eq!(environment["NSSM_EVENT"], "Rotate");
+        assert_eq!(environment["NSSM_TRIGGER"], "ROTATE");
+        assert_eq!(environment["NSSM_LAST_CONTROL"], "ROTATE");
+        assert_eq!(environment["NSSM_EXITCODE"], "");
+        assert!(environment["NSSM_APPLICATION_PID"].parse::<u32>().is_ok());
+        assert!(
+            environment["NSSM_APPLICATION_RUNTIME"]
+                .parse::<u64>()
+                .is_ok()
+        );
+    }
+    assert_eq!(rotate_pre["NSSM_ACTION"], "Pre");
+    assert_eq!(rotate_post["NSSM_ACTION"], "Post");
+    assert_eq!(rotate_pre["NSSM_DEADLINE"], "60000");
+    assert_eq!(rotate_post["NSSM_DEADLINE"], "60000");
+    assert_eq!(stop_pre["NSSM_EVENT"], "Stop");
+    assert_eq!(stop_pre["NSSM_ACTION"], "Pre");
+    assert_eq!(stop_pre["NSSM_TRIGGER"], "STOP");
+    assert_eq!(stop_pre["NSSM_LAST_CONTROL"], "STOP");
+    assert_eq!(stop_pre["NSSM_DEADLINE"], "20000");
+    assert_eq!(stop_pre["NSSM_EXITCODE"], "");
+    assert!(stop_pre["NSSM_APPLICATION_PID"].parse::<u32>().is_ok());
+    assert!(stop_pre["NSSM_APPLICATION_RUNTIME"].parse::<u64>().is_ok());
 }
 
 #[test]
