@@ -25,6 +25,7 @@ It is a partial report, not the command-by-command release acceptance report.
 | `processes Spooler` when the service process cannot be opened | Both exited 0 and emitted no process-tree stdout. NSSM reports the process-open failure on stderr; nssm-rs now does the same rather than printing a fabricated `???` root. PowerShell remoting altered the reference's localized stderr encoding, so exact error-text bytes remain unverified. |
 | `dump` for equivalent installed services | Compared complete output after normalizing the executable path and service name. Install line, Windows shell escaping, AppParameters, AppDirectory, default AppExit, extra environment, symbolic priority, rotation threshold, Description, DisplayName, ObjectName, Start and Type matched. |
 | Managed/native setting set/get sweep | Set and read back AppNoConsole, AppPriority, AppRestartDelay, AppThrottle, AppRotateBytes, AppAffinity, AppExit Default, AppEnvironmentExtra, AppParameters, AppDirectory, Description, DisplayName, ObjectName, Start and Type on paired temporary services. Exit codes and normalized output matched for every case. |
+| All 28 managed DWORD settings | Paired temporary services matched on set/get/reset, configured values, reset defaults, and exit codes for all 28 Windows DWORD settings. |
 | `get Spooler Start` | Both exited 0 and returned the same startup type. |
 | `get Spooler Type` | Both exited 0 and returned the same service type. |
 | `get Spooler DisplayName` | Both exited 0 and returned the same display name. |
