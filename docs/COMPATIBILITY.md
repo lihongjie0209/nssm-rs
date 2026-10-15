@@ -113,6 +113,9 @@ process lifetime to avoid including unrelated processes after PID reuse.
 metadata support now includes Description, DisplayName, ImagePath, ObjectName,
 Start, Type, service Environment and service/group dependency lists. Direct
 stdin/stdout/stderr file redirection, staged console/window/thread shutdown,
+and service references by either SCM key name or display name are implemented;
+the local reference comparison and Windows integration test check display-name
+lookup and canonical-name output.
 startup and online/on-demand log rotation, UTC per-line log timestamps,
 Start/Pre, Start/Post, Stop/Pre, Exit/Post, Rotate and Power hooks, and
 configuration dump are implemented. The Windows integration suite checks real

@@ -986,6 +986,26 @@ fn managed_settings_on_native_services_return_nssm_compatibility_error() {
 }
 
 #[test]
+fn native_service_queries_accept_display_names_and_return_the_canonical_name() {
+    let key_name = cli(&["get", "Schedule", "Start"]);
+    let display_name = cli(&["get", "Task Scheduler", "Start"]);
+    assert!(key_name.status.success());
+    assert!(
+        display_name.status.success(),
+        "display-name query failed: {}",
+        String::from_utf8_lossy(&display_name.stderr)
+    );
+    assert_eq!(display_name.stdout, key_name.stdout);
+
+    let canonical_name = cli(&["get", "Task Scheduler", "Name"]);
+    assert!(canonical_name.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&canonical_name.stdout).trim(),
+        "Schedule"
+    );
+}
+
+#[test]
 fn sends_ctrl_c_to_child_in_its_console_before_termination_fallback() {
     verify_service_shutdown_signal(&[], "6", "ctrl-c");
 }

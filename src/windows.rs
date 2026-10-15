@@ -1065,6 +1065,7 @@ fn reset_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(),
 }
 
 fn open_service_registry(service: &str, create: bool, access: u32) -> Result<RegKey, String> {
+    let service = canonical_service_name(service).map_err(|error| error.to_string())?;
     let path = wide(OsStr::new(&format!("{SERVICE_KEY_PREFIX}{service}")));
     let mut key = ptr::null_mut();
     let code = if create {
@@ -1215,7 +1216,8 @@ fn get_native_setting(service: &str, parameter: &str, extra: &[String]) -> Resul
             Ok(())
         }
         "name" => {
-            cli_println!("{service}\r");
+            let canonical = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());
+            cli_println!("{canonical}\r");
             Ok(())
         }
         "dependongroup" | "dependonservice" | "description" | "displayname" | "imagepath"
@@ -1932,6 +1934,8 @@ fn dump_native_settings(executable: &str, source: &str, target: &str) -> Result<
 }
 
 fn dump_service(source: &str, target: Option<&str>) -> Result<(), (u8, String)> {
+    let source = canonical_service_name(source).map_err(|error| (3, error.to_string()))?;
+    let source = source.as_str();
     let _service = open_service(source, SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG)
         .map_err(|error| (3, error))?;
     let application = read_optional_reg_string(source, "Application")
@@ -2190,8 +2194,9 @@ fn open_manager(access: u32) -> Result<ScHandle, String> {
 }
 
 fn open_service(name: &str, access: u32) -> Result<ScHandle, String> {
+    let canonical_name = canonical_service_name(name).map_err(|error| error.to_string())?;
     let manager = open_manager(SC_MANAGER_CONNECT)?;
-    let name = wide(OsStr::new(name));
+    let name = wide(OsStr::new(&canonical_name));
     let h = unsafe { OpenServiceW(manager.0, name.as_ptr(), access) };
     if h.is_null() {
         Err(io::Error::last_os_error().to_string())
@@ -2200,23 +2205,120 @@ fn open_service(name: &str, access: u32) -> Result<ScHandle, String> {
     }
 }
 
-fn missing_service_error(name: &str) -> Option<io::Error> {
+fn canonical_service_name(name: &str) -> Result<String, io::Error> {
     let manager = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
     if manager.is_null() {
-        return None;
+        return Err(io::Error::last_os_error());
     }
-    let name = wide(OsStr::new(name));
-    let service = unsafe { OpenServiceW(manager, name.as_ptr(), SERVICE_QUERY_STATUS) };
+    let service_name = wide(OsStr::new(name));
+    let service = unsafe { OpenServiceW(manager, service_name.as_ptr(), SERVICE_QUERY_STATUS) };
     if !service.is_null() {
         unsafe {
             CloseServiceHandle(service);
             CloseServiceHandle(manager);
         }
-        return None;
+        return Ok(name.to_owned());
     }
-    let error = io::Error::last_os_error();
+    let open_error = io::Error::last_os_error();
     unsafe { CloseServiceHandle(manager) };
-    (error.raw_os_error() == Some(1060)).then_some(error)
+    if open_error.raw_os_error() != Some(1060) {
+        return Ok(name.to_owned());
+    }
+
+    let manager = unsafe {
+        OpenSCManagerW(
+            ptr::null(),
+            ptr::null(),
+            SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE,
+        )
+    };
+    if manager.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut required = 0;
+    let mut returned = 0;
+    let mut resume = 0;
+    unsafe {
+        EnumServicesStatusExW(
+            manager,
+            SC_ENUM_PROCESS_INFO,
+            SERVICE_DRIVER | SERVICE_FILE_SYSTEM_DRIVER | SERVICE_KERNEL_DRIVER | SERVICE_WIN32,
+            SERVICE_STATE_ALL,
+            ptr::null_mut(),
+            0,
+            &mut required,
+            &mut returned,
+            &mut resume,
+            ptr::null(),
+        );
+    }
+    let enumeration_error = io::Error::last_os_error();
+    if enumeration_error.raw_os_error() != Some(234) {
+        unsafe { CloseServiceHandle(manager) };
+        return Err(enumeration_error);
+    }
+    let mut storage = vec![0usize; (required as usize).div_ceil(std::mem::size_of::<usize>())];
+    loop {
+        let mut bytes_needed = 0;
+        let mut count = 0;
+        let success = unsafe {
+            EnumServicesStatusExW(
+                manager,
+                SC_ENUM_PROCESS_INFO,
+                SERVICE_DRIVER | SERVICE_FILE_SYSTEM_DRIVER | SERVICE_KERNEL_DRIVER | SERVICE_WIN32,
+                SERVICE_STATE_ALL,
+                storage.as_mut_ptr().cast(),
+                (storage.len() * std::mem::size_of::<usize>()) as u32,
+                &mut bytes_needed,
+                &mut count,
+                &mut resume,
+                ptr::null(),
+            )
+        };
+        let error = if success == 0 {
+            Some(io::Error::last_os_error())
+        } else {
+            None
+        };
+        if let Some(error) = &error
+            && error.raw_os_error() != Some(234)
+        {
+            unsafe { CloseServiceHandle(manager) };
+            return Err(io::Error::from_raw_os_error(
+                error.raw_os_error().unwrap_or_default(),
+            ));
+        }
+        let entries = storage.as_ptr().cast::<ENUM_SERVICE_STATUS_PROCESSW>();
+        for index in 0..count as usize {
+            let entry = unsafe { &*entries.add(index) };
+            if windows_strings_equal(name, &wide_pointer(entry.lpDisplayName)) {
+                let service_name = wide_pointer(entry.lpServiceName);
+                unsafe { CloseServiceHandle(manager) };
+                return Ok(service_name);
+            }
+        }
+        if let Some(error) = error {
+            if bytes_needed > (storage.len() * std::mem::size_of::<usize>()) as u32 {
+                storage.resize(
+                    (bytes_needed as usize).div_ceil(std::mem::size_of::<usize>()),
+                    0,
+                );
+            }
+            if error.raw_os_error() == Some(234) {
+                continue;
+            }
+        } else {
+            unsafe { CloseServiceHandle(manager) };
+            return Err(open_error);
+        }
+    }
+}
+
+fn missing_service_error(name: &str) -> Option<io::Error> {
+    match canonical_service_name(name) {
+        Err(error) if error.raw_os_error() == Some(1060) => Some(error),
+        _ => None,
+    }
 }
 
 fn missing_process_service_diagnostic() -> String {
@@ -2400,6 +2502,8 @@ fn wait_state(service: SC_HANDLE, expected: u32) -> Result<(), String> {
 }
 
 fn remove(name: &str, confirmed: bool) -> Result<(), String> {
+    let name = canonical_service_name(name).map_err(|error| error.to_string())?;
+    let name = name.as_str();
     if !confirmed {
         eprint!("Remove service '{name}'? [y/N] ");
         let mut response = String::new();
@@ -2565,6 +2669,8 @@ fn process_belongs_to_service_lifetime(
 }
 
 fn process_tree(service: &str) -> Result<(), String> {
+    let canonical = canonical_service_name(service).map_err(|error| error.to_string())?;
+    let service = canonical.as_str();
     let service_handle = open_service(service, SERVICE_QUERY_STATUS)?;
     let mut status = SERVICE_STATUS_PROCESS::default();
     let mut needed = 0;
@@ -3075,7 +3181,7 @@ fn report_stdio_setup_failure(service: &str, app: &str, error: &StdioFileError) 
     );
 }
 
-fn windows_paths_equal(first: &str, second: &str) -> bool {
+fn windows_strings_equal(first: &str, second: &str) -> bool {
     let first: Vec<u16> = first.encode_utf16().collect();
     let second: Vec<u16> = second.encode_utf16().collect();
     unsafe {
@@ -4170,7 +4276,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         let same_output_path = stdout_path
             .as_deref()
             .zip(stderr_path.as_deref())
-            .is_some_and(|(stdout, stderr)| windows_paths_equal(stdout, stderr));
+            .is_some_and(|(stdout, stderr)| windows_strings_equal(stdout, stderr));
         if rotate_files {
             for (index, (path, copy)) in [
                 (stdout_path.as_deref(), stdout_copy_and_truncate),
