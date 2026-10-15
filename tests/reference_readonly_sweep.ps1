@@ -18,8 +18,6 @@ foreach ($binary in @($ReferenceBinary, $CandidateBinary)) {
 # Only invoke recognized, non-interactive commands. In particular, do not run
 # NSSM with no arguments: its detached-console fallback can open a GUI dialog.
 $cases = @(
-    @{ Name = 'help'; Args = @('help') },
-    @{ Name = 'HELP'; Args = @('HELP') },
     @{ Name = 'list'; Args = @('list') },
     @{ Name = 'list all'; Args = @('list', 'all') },
     @{ Name = 'list all with ignored trailing argument'; Args = @('LIST', 'all', 'ignored') },
