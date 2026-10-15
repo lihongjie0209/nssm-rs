@@ -2593,6 +2593,14 @@ fn start_pre_hook_exit_99_aborts_application_launch() {
         "Start/Pre hook did not run and abort startup: {:?}",
         std::fs::read_to_string(&hook_path)
     );
+    let escaped_service = service.replace('\'', "''");
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1079}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 4 -and $event.Properties[0].Value -eq 'START' -and $event.Properties[1].Value -eq 'PRE' -and $event.Properties[2].Value -eq '{escaped_service}' -and $event.Properties[3].Value -eq '99') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "event 1079 records the aborted Start/Pre hook and exit code"
+    );
     thread::sleep(Duration::from_millis(250));
     assert!(
         !std::path::Path::new(&app_path).exists(),

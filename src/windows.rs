@@ -103,6 +103,7 @@ const EVENT_EFFECTIVE_AFFINITY_MASK: u32 = 0x8000_042c;
 const EVENT_GET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0x8000_042d;
 const EVENT_SET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0xc000_042e;
 const EVENT_BOGUS_STOP_METHOD_SKIP: u32 = 0x8000_041c;
+const EVENT_PRESTART_HOOK_ABORT: u32 = 0xc000_0437;
 const EVENT_QUERYVALUE_FAILED: u32 = 0xc000_03fa;
 const PRIORITY_CLASS_MASK: u32 = 0x0000_c1e0;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
@@ -4850,6 +4851,11 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             ),
             Ok(Some(99))
         ) {
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_PRESTART_HOOK_ABORT,
+                &["START", "PRE", &service_name, "99"],
+            );
             finish_async_hooks();
             set_status(SERVICE_STOPPED, 99, 0);
             return;
