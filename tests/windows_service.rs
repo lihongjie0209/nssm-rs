@@ -2425,6 +2425,24 @@ fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
         wait_for_windows_powershell_condition(&event_script),
         "Application log contains event 1035 for resetting the restart throttle on Continue"
     );
+    assert!(
+        wait_for_service_state(&service, "SERVICE_PAUSED"),
+        "service did not re-enter the restart-throttle wait after Continue"
+    );
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "stop during restart throttle failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    let already_stopped_script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1012}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq '{ping}' -and $event.Message.Contains('No action is required')) {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&already_stopped_script),
+        "Application log contains event 1012 when stopping during the child-free throttle wait"
+    );
 }
 
 #[test]

@@ -51,6 +51,7 @@ const EVENT_START_SERVICE_FAILED: u32 = 0xc000_03ee;
 const EVENT_STARTED_SERVICE: u32 = 0x4000_03f0;
 const EVENT_CREATEPROCESS_FAILED: u32 = 0xc000_03f2;
 const EVENT_TERMINATEPROCESS: u32 = 0x4000_03f3;
+const EVENT_PROCESS_ALREADY_STOPPED: u32 = 0x4000_03f4;
 const EVENT_ENDED_SERVICE: u32 = 0x4000_03f5;
 const EVENT_EXIT_RESTART: u32 = 0x4000_03f6;
 const EVENT_EXIT_IGNORE: u32 = 0x4000_03f7;
@@ -3264,6 +3265,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     let timestamp_log = read_reg_dword(&service_name, "AppTimestampLog", 0).unwrap_or(0) != 0;
     let mut throttle = nssm_rs::RestartThrottle::new(restart_delay_ms);
     let mut stop_hook_invoked = false;
+    let mut stop_process_handled = false;
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
         HOOK_START_REQUESTED_COUNT.fetch_add(1, Ordering::SeqCst);
         set_status(SERVICE_START_PENDING, 0, 10_000);
@@ -3714,6 +3716,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             if let Some(mut proc) = child.take() {
                 let stop_requested = STOP_REQUESTED.load(Ordering::SeqCst);
                 if stop_requested {
+                    stop_process_handled = true;
                     let _ = stop_child(&service_name, &app, &mut proc, no_console);
                 }
                 if let Ok(status) = proc.child.wait() {
@@ -3840,6 +3843,13 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 );
             }
         }
+    }
+    if STOP_REQUESTED.load(Ordering::SeqCst) && !stop_process_handled {
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+            EVENT_PROCESS_ALREADY_STOPPED,
+            &[&service_name, &app],
+        );
     }
     if STOP_REQUESTED.load(Ordering::SeqCst) && !stop_hook_invoked {
         let _ = invoke_hook(

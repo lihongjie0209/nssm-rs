@@ -39,7 +39,7 @@ interface and Windows service behavior. GUI workflows are explicitly excluded.
 | Hooks | `AppEvents <event>/<action> <command>` for service/app start, stop, rotate lifecycle and pre/post phases; hook output-handle behavior and all `NSSM_*` ABI variables | Event-order integration assertions for normal start, restart, stop, rotation, failures, and cancellation; assert the full environment ABI on real Start, Exit, Stop and Rotate hooks |
 | Discovery/reporting | `list` and `list all`; `processes <name>`; `dump <name>` and `dump <name> <newname>` | Golden output tests, quoting/escaping round-trip, process tree correctness, native-service filtering |
 | Windows process launch | Correct Windows quoting, Unicode paths/args, environment expansion, priority, CPU affinity, console/window behavior | Launch fixture with argv/environment echo, Unicode and special-character cases, priority/affinity inspection |
-| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; events 1001, 1006, 1008, 1010, 1011, 1013, 1014, 1015, 1016, 1020, 1034, 1035, 1040, 1041, 1072 and 1077 are verified |
+| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1020, 1034, 1035, 1040, 1041, 1072 and 1077 are verified |
 
 ### Complete setting-name inventory
 
@@ -155,10 +155,13 @@ SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
 acceptance scope includes system-level Power event delivery and hook ABI context
 parity, event-log compatibility
-beyond events 1001, 1006, 1008, 1010, 1011, 1013, 1014, 1015, 1016, 1020, 1034,
+beyond events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1020, 1034,
 1035, 1040, 1041, 1072 and 1077,
 broader error-path coverage, and command-by-command parity against the pinned
 reference. Missing-service exit status 3 is now covered for status, start, stop,
-restart, pause, continue, rotate, get, set, reset and confirmed remove.
+restart, pause, continue, rotate, get, set, reset and confirmed remove. A real
+SCM stop during the child-free restart-throttle wait verifies event 1012 and
+its service/application insertion values; stopping a running child verifies
+event 1011.
 Do not call this a complete NSSM replacement or publish a stable release until
 each acceptance row has evidence.
