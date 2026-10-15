@@ -2654,7 +2654,7 @@ fn timestamp_log_prefixes_each_child_output_line_in_utc() {
         &service,
         &command_prompt,
         "/c",
-        "echo first-marker & echo second-marker",
+        "echo first-marker & timeout /t 1 /nobreak >nul & echo second-marker",
     ]);
     assert!(
         installed.status.success(),
