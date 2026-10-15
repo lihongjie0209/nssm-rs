@@ -1999,12 +1999,12 @@ fn dump_managed_settings(executable: &str, source: &str, target: &str) -> Result
                     continue;
                 };
                 for code in registry_names(key.0, false)? {
-                    let value_name = if code.is_empty() {
-                        None
-                    } else {
-                        Some(code.as_str())
-                    };
-                    if let Some((_, bytes)) = read_raw_value(key.0, value_name)? {
+                    // NSSM's dump command serializes only the default AppExit
+                    // action, even when code-specific actions are configured.
+                    if !code.is_empty() {
+                        continue;
+                    }
+                    if let Some((_, bytes)) = read_raw_value(key.0, None)? {
                         let value = decode_wide(&bytes)?;
                         let additional = if code.is_empty() { "Default" } else { &code };
                         dump_set_line(executable, target, spec.name, Some(additional), &value);
