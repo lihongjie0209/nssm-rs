@@ -97,6 +97,7 @@ const EVENT_SERVICE_CONTROL_NOT_HANDLED: u32 = 0x4000_0411;
 const EVENT_SERVICE_CONTROL_UNKNOWN: u32 = 0x4000_0412;
 const EVENT_KILL_PROCESS_TREE: u32 = 0x4000_0403;
 const EVENT_BOGUS_PRIORITY: u32 = 0x4000_042a;
+const EVENT_BOGUS_AFFINITY_MASK: u32 = 0x8000_042b;
 const PRIORITY_CLASS_MASK: u32 = 0x0000_c1e0;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
@@ -4419,7 +4420,21 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 value
             }
         };
-        let affinity = read_optional_reg_string(&service_name, "AppAffinity")?;
+        let configured_affinity = read_optional_reg_string(&service_name, "AppAffinity")?;
+        let affinity = match configured_affinity {
+            Some(value) if !value.is_empty() => match parse_cpu_affinity(&value) {
+                Ok(_) => Some(value),
+                Err(_) => {
+                    report_event(
+                        windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                        EVENT_BOGUS_AFFINITY_MASK,
+                        &[&service_name, &value],
+                    );
+                    None
+                }
+            },
+            value => value,
+        };
         let configured_priority = read_reg_dword(&service_name, "AppPriority", 0x20)?;
         let priority = if valid_priority_class(configured_priority) {
             configured_priority

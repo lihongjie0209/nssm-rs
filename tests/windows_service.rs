@@ -2067,7 +2067,7 @@ fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
 
     let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
     let write_invalid_priority = format!(
-        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppPriority -PropertyType DWord -Value 65536 -Force"
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppPriority -PropertyType DWord -Value 65536 -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppAffinity -PropertyType String -Value 'not-a-cpu-range' -Force"
     );
     let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
@@ -2104,6 +2104,13 @@ fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
     assert!(
         wait_for_windows_powershell_condition(&event),
         "invalid AppPriority logs event 1066 with service name and setting"
+    );
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1067}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 'not-a-cpu-range') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "invalid AppAffinity logs event 1067 with service name and requested mask"
     );
 }
 
