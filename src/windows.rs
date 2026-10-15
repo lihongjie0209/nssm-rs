@@ -3727,7 +3727,8 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, hook_deadline_ms, power_hook_action,
+        PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, hook_deadline_ms, parse_u32,
+        power_hook_action, priority_name, priority_value, valid_hook,
     };
 
     #[test]
@@ -3748,5 +3749,70 @@ mod tests {
         assert_eq!(power_hook_action(4), None);
         assert_eq!(power_hook_action(7), None);
         assert_eq!(power_hook_action(0xffff), None);
+    }
+
+    #[test]
+    fn unsigned_setting_values_accept_decimal_and_hex_but_reject_invalid_numbers() {
+        assert_eq!(parse_u32("42"), Ok(42));
+        assert_eq!(parse_u32(" 0xff "), Ok(255));
+        assert_eq!(parse_u32("0XFFFFFFFF"), Ok(u32::MAX));
+        assert!(parse_u32("").is_err());
+        assert!(parse_u32("-1").is_err());
+        assert!(parse_u32("0x").is_err());
+        assert!(parse_u32("4294967296").is_err());
+    }
+
+    #[test]
+    fn priority_names_round_trip_to_windows_priority_class_values() {
+        for (name, value) in [
+            ("IDLE_PRIORITY_CLASS", 0x40),
+            ("BELOW_NORMAL_PRIORITY_CLASS", 0x4000),
+            ("NORMAL_PRIORITY_CLASS", 0x20),
+            ("ABOVE_NORMAL_PRIORITY_CLASS", 0x8000),
+            ("HIGH_PRIORITY_CLASS", 0x80),
+            ("REALTIME_PRIORITY_CLASS", 0x100),
+        ] {
+            assert_eq!(priority_value(name), Ok(value));
+            assert_eq!(priority_value(&name.to_ascii_lowercase()), Ok(value));
+            assert_eq!(priority_name(value), Ok(name));
+        }
+        assert!(priority_value("INVALID_PRIORITY_CLASS").is_err());
+        assert!(priority_name(0).is_err());
+    }
+
+    #[test]
+    fn hook_configuration_accepts_only_supported_event_action_pairs() {
+        for (event, action) in [
+            ("Exit", "Post"),
+            ("Power", "Change"),
+            ("Power", "Resume"),
+            ("Rotate", "Pre"),
+            ("Rotate", "Post"),
+            ("Start", "Pre"),
+            ("Start", "Post"),
+            ("Stop", "Pre"),
+        ] {
+            assert!(
+                valid_hook(event, action),
+                "{event}/{action} should be valid"
+            );
+            assert!(
+                valid_hook(&event.to_ascii_lowercase(), &action.to_ascii_lowercase()),
+                "{event}/{action} should be case-insensitive"
+            );
+        }
+        for (event, action) in [
+            ("Exit", "Pre"),
+            ("Power", "Pre"),
+            ("Rotate", "Change"),
+            ("Start", "Change"),
+            ("Stop", "Post"),
+            ("Unknown", "Post"),
+        ] {
+            assert!(
+                !valid_hook(event, action),
+                "{event}/{action} should be invalid"
+            );
+        }
     }
 }
