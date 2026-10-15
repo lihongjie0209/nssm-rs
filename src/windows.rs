@@ -46,6 +46,7 @@ use windows_sys::Win32::{
 
 const DELETE_ACCESS: u32 = 0x0001_0000;
 const STOP_SKIP_CONSOLE: u32 = 1;
+const EVENT_DISPATCHER_FAILED: u32 = 0xc000_03e9;
 const EVENT_CREATEPROCESS_FAILED: u32 = 0xc000_03f2;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
@@ -3556,7 +3557,9 @@ pub fn run_service(name: &str) -> Result<(), String> {
         },
     ];
     if unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) } == 0 {
-        Err(io::Error::last_os_error().to_string())
+        let error = io::Error::last_os_error().to_string();
+        report_event(EVENTLOG_ERROR_TYPE, EVENT_DISPATCHER_FAILED, &[&error]);
+        Err(error)
     } else {
         Ok(())
     }

@@ -421,6 +421,35 @@ fn logs_child_process_launch_failures_to_the_application_event_log() {
     );
 }
 
+#[test]
+fn logs_service_dispatcher_failures_to_the_application_event_log() {
+    let output = cli(&["__service", &unique_service_name()]);
+    assert!(
+        !output.status.success(),
+        "a service host started outside the SCM must fail"
+    );
+
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let script = "$events = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='nssm'; Id=1001} -MaxEvents 40 -ErrorAction SilentlyContinue; foreach ($event in $events) { if ($event.Properties.Count -eq 1 -and $event.Properties[0].Value -and $event.Message.Contains('StartServiceCtrlDispatcher() failed')) { exit 0 } }; exit 1";
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut event_found = false;
+    while Instant::now() < deadline {
+        event_found = Command::new(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .status()
+            .is_ok_and(|status| status.success());
+        if event_found {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        event_found,
+        "Application log contains NSSM event 1001 with the dispatcher error"
+    );
+}
+
 fn verify_service_shutdown_signal(arguments: &[&str], skip: &str, expected: &str) {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
