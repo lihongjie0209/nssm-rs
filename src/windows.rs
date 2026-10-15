@@ -48,8 +48,9 @@ use windows_sys::Win32::{
     },
     UI::Shell::{IsUserAnAdmin, SHELLEXECUTEINFOW, ShellExecuteExW},
     UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        PostThreadMessageW, SMTO_ABORTIFHUNG, SW_SHOW, SendMessageTimeoutW, WM_CLOSE, WM_QUIT,
+        ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, EnumWindows,
+        GetWindowThreadProcessId, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PostMessageW,
+        PostThreadMessageW, SW_SHOW, WM_CLOSE, WM_ENDSESSION, WM_QUIT,
     },
 };
 
@@ -3660,9 +3661,14 @@ unsafe extern "system" fn post_close_to_process_window(hwnd: HWND, target_pid: L
     let mut process_id = 0;
     unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) };
     if process_id == target_pid as u32 {
-        let mut result = 0;
         unsafe {
-            SendMessageTimeoutW(hwnd, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 1000, &mut result);
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            PostMessageW(
+                hwnd,
+                WM_ENDSESSION,
+                1,
+                (ENDSESSION_CLOSEAPP | ENDSESSION_CRITICAL | ENDSESSION_LOGOFF) as isize,
+            );
         }
     }
     1
