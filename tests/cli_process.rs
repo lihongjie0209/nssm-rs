@@ -43,6 +43,34 @@ fn unknown_native_service_setting_lists_supported_parameters() {
     assert!(stderr.ends_with("Type\r\n"));
 }
 
+#[cfg(windows)]
+#[test]
+fn managed_settings_on_native_services_match_nssm_error_bytes() {
+    let ordinary = run(&["get", "Spooler", "AppEnvironment"]);
+    assert_eq!(ordinary.status.code(), Some(1));
+    assert!(ordinary.stdout.is_empty());
+    assert_eq!(
+        ordinary.stderr,
+        b"Parameter \"AppEnvironment\" is only valid for services managed by NSSM!\r\r\n"
+    );
+
+    for (setting, expected) in [
+        (
+            "AppExit",
+            b"Parameter \"AppExit\" requires a subparameter!\r\r\n".as_slice(),
+        ),
+        (
+            "AppEvents",
+            b"Parameter \"AppEvents\" requires a subparameter!\r\r\n".as_slice(),
+        ),
+    ] {
+        let result = run(&["get", "Spooler", setting]);
+        assert_eq!(result.status.code(), Some(1), "{setting}");
+        assert!(result.stdout.is_empty(), "{setting}");
+        assert_eq!(result.stderr, expected, "{setting}");
+    }
+}
+
 #[cfg(not(windows))]
 #[test]
 fn service_operation_on_unsupported_host_fails_without_claiming_success() {

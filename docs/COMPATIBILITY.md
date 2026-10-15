@@ -192,6 +192,12 @@ retains the original Suicide action and event 1021 explains the graceful fallbac
 Do not call this a complete NSSM replacement or publish a stable release until
 each acceptance row has evidence.
 
+The read-only Windows reference sweep now checks all 39 managed setting names
+against a native service and compares the exact stdout/stderr bytes and exit
+status. It caught and resolved the extra carriage return NSSM emits for
+managed-setting rejection and the missing-subparameter precedence for `AppExit`
+and `AppEvents`; exact-byte Windows process tests cover these regressions.
+
 The service host now distinguishes an initial child launch failure from a
 failed launch after an application Restart action. The latter reports warning
 event 1007 with the executable and service name, then waits 30 seconds and

@@ -47,6 +47,26 @@ $cases = @(
     @{ Name = 'unknown setting on native service'; Args = @('get', 'Spooler', 'DefinitelyNotASetting') }
 )
 
+# Query every managed setting against a native service. This exercises NSSM's
+# per-setting native-service rejection path without changing machine state.
+$managedSettings = @(
+    'Application', 'AppParameters', 'AppDirectory', 'AppExit', 'AppEvents',
+    'AppAffinity', 'AppEnvironment', 'AppEnvironmentExtra', 'AppNoConsole',
+    'AppPriority', 'AppRestartDelay', 'AppStdin', 'AppStdinShareMode',
+    'AppStdinCreationDisposition', 'AppStdinFlagsAndAttributes', 'AppStdout',
+    'AppStdoutShareMode', 'AppStdoutCreationDisposition', 'AppStdoutFlagsAndAttributes',
+    'AppStdoutCopyAndTruncate', 'AppStderr', 'AppStderrShareMode',
+    'AppStderrCreationDisposition', 'AppStderrFlagsAndAttributes',
+    'AppStderrCopyAndTruncate', 'AppStopMethodSkip', 'AppStopMethodConsole',
+    'AppStopMethodWindow', 'AppStopMethodThreads', 'AppKillProcessTree',
+    'AppThrottle', 'AppRedirectHook', 'AppRotateFiles', 'AppRotateOnline',
+    'AppRotateSeconds', 'AppRotateBytes', 'AppRotateBytesHigh', 'AppRotateDelay',
+    'AppTimestampLog'
+)
+foreach ($setting in $managedSettings) {
+    $cases += @{ Name = "get Spooler $setting (native service)"; Args = @('get', 'Spooler', $setting) }
+}
+
 function Quote-WindowsArgument([string] $Argument) {
     if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') {
         return $Argument

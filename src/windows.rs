@@ -5166,6 +5166,16 @@ pub fn execute(command: Command) -> Result<u8, String> {
         print_invalid_parameter(parameter);
         return Ok(1);
     }
+    if let Command::Get {
+        parameter, extra, ..
+    } = &command
+        && extra.is_empty()
+        && (parameter.eq_ignore_ascii_case("AppExit")
+            || parameter.eq_ignore_ascii_case("AppEvents"))
+    {
+        cli_eprintln!("Parameter \"{parameter}\" requires a subparameter!\r\r");
+        return Ok(1);
+    }
     let managed_parameter = match &command {
         Command::Get {
             service, parameter, ..
@@ -5184,7 +5194,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
     if let Some((service, parameter)) = managed_parameter
         && !is_nssm_service(service)
     {
-        cli_eprintln!("Parameter \"{parameter}\" is only valid for services managed by NSSM!\r");
+        cli_eprintln!("Parameter \"{parameter}\" is only valid for services managed by NSSM!\r\r");
         return Ok(1);
     }
     match command {
