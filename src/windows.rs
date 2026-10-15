@@ -3571,8 +3571,9 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                     &[&service_name, &exit_code, "Suicide"],
                 );
                 finish_async_hooks();
-                set_status(SERVICE_STOPPED, child_exit_code.max(1), 0);
-                return;
+                // NSSM deliberately exits without reporting SERVICE_STOPPED so
+                // SCM treats this as a service crash and can run recovery actions.
+                std::process::exit(child_exit_code.max(1) as i32);
             }
             ExitAction::Restart => {
                 report_event(

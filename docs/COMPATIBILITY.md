@@ -32,14 +32,14 @@ interface and Windows service behavior. GUI workflows are explicitly excluded.
 | Managed service settings | `Application`, `AppParameters`, `AppDirectory`, `AppExit`, `AppEvents`, `AppAffinity`, `AppEnvironment`, `AppEnvironmentExtra`, `AppNoConsole`, `AppPriority`, `AppRestartDelay`, `AppThrottle`, `AppKillProcessTree` | Parameter round-trip/default/validation tests; supervise real test child processes |
 | I/O | `AppStdin`, `AppStdout`, `AppStderr`, their share mode, creation disposition and flags; stderr/stdout copy-and-truncate; append/truncate semantics | Child reads stdin and emits distinct streams; assert exact file contents and handle modes |
 | Shutdown | `AppStopMethodSkip`, console Ctrl-C, window close, thread close and configurable grace periods; process-tree termination | Child fixture responds to each signal or ignores it; assert graceful path, timeout and descendants cleanup |
-| Restart policy | Exit-code-specific/default `Restart`, `Ignore`, `Exit`, `Suicide`; throttle and restart delay; reset throttle after long-running success | Deterministic child fixtures exit with chosen codes and delays; assert restart counts, timing bounds and stop state |
+| Restart policy | Exit-code-specific/default `Restart`, `Ignore`, `Exit`, `Suicide`; throttle and restart delay; reset throttle after long-running success | Deterministic child fixtures exit with chosen codes and delays; assert restart counts, timing bounds, Ignore/Exit service states, and Suicide's abnormal SCM termination |
 | Log rotation | `AppRotateFiles`, `AppRotateOnline`, `AppRotateSeconds`, low/high byte thresholds, delay, timestamping; `rotate <name>` | Boundary-size/age tests, active-file and naming assertions, integration for online rotation |
 | Environment | App environment overrides, extra environment, system/service merged environment; ordered KEY=VALUE edits and case-insensitive keys; `+`, `-`, `:` modifiers and optional single-key query | Unit tests for ordering, replacement, conditional delete, clear/reset, malformed blocks and expansion; child sees expected environment |
 | Service metadata | `Description`, `DisplayName`, `ObjectName`, `Start`, `Type`, `DependOnGroup`, `DependOnService`, `ImagePath`, `Name` | Native SCM readback, accepted enum validation, account/dependency error handling |
 | Hooks | `AppEvents <event>/<action> <command>` for service/app start, stop, rotate lifecycle and pre/post phases; hook output-handle behavior and all `NSSM_*` ABI variables | Event-order integration assertions for normal start, restart, stop, rotation, failures, and cancellation; assert the full environment ABI on real Start, Exit, Stop and Rotate hooks |
 | Discovery/reporting | `list` and `list all`; `processes <name>`; `dump <name>` and `dump <name> <newname>` | Golden output tests, quoting/escaping round-trip, process tree correctness, native-service filtering |
 | Windows process launch | Correct Windows quoting, Unicode paths/args, environment expansion, priority, CPU affinity, console/window behavior | Launch fixture with argv/environment echo, Unicode and special-character cases, priority/affinity inspection |
-| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; currently events 1001 (dispatcher failure), 1006 (service start failure), 1008 (child started), 1010 (child launch failure), 1013 (child exited), and 1016 (Exit action) are verified |
+| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; currently events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, and 1020 are verified |
 
 ### Complete setting-name inventory
 
@@ -124,7 +124,8 @@ CTRL+C, WM_CLOSE and WM_QUIT before termination fallback; hook tests capture all
 documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
 Rotate/Pre/Post and verify the configured working directory. Remaining
 acceptance scope includes hook ABI context parity for Power events, event-log compatibility
-beyond events 1001, 1006, 1008, 1010, 1013, and 1016, broader error-path
-coverage, and command-by-command parity against the pinned reference.
+beyond events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, and 1020,
+broader error-path coverage, and command-by-command parity against the pinned
+reference.
 Do not call this a complete NSSM replacement or publish a stable release until
 each acceptance row has evidence.

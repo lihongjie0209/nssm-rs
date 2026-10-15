@@ -92,6 +92,23 @@ fn wait_for_service_state(service: &str, expected: &str) -> bool {
     false
 }
 
+fn wait_for_windows_powershell_condition(script: &str) -> bool {
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if Command::new(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    false
+}
+
 fn file_identity(path: &str) -> (u32, u64) {
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
@@ -1609,6 +1626,13 @@ fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
         repeated,
         "exit policy did not restart the application three times"
     );
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1014}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 4 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq 23 -and $event.Properties[2].Value -eq 'Restart' -and $event.Properties[3].Value -eq '{command_prompt}' -and $event.Message.Contains('Attempting to restart')) {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&script),
+        "Application log contains event 1014 with the exit code, Restart action and executable"
+    );
     assert_eq!(
         String::from_utf8_lossy(&cli(&["status", &service]).stdout).trim(),
         "SERVICE_RUNNING"
@@ -1677,6 +1701,20 @@ fn ignore_and_exit_actions_have_distinct_service_lifecycles() {
             cli(&["status", &service]).stdout,
             std::fs::read_to_string(&exit_path)
         );
+        let event_script = if action == "Ignore" {
+            format!(
+                "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1015}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 4 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq 23 -and $event.Properties[2].Value -eq 'Ignore' -and $event.Properties[3].Value -eq '{command_prompt}' -and $event.Message.Contains('No action will be taken')) {{ exit 0 }} }}; exit 1"
+            )
+        } else {
+            format!(
+                "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1016}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq 23 -and $event.Properties[2].Value -eq 'Exit' -and $event.Message.Contains('Exiting')) {{ exit 0 }} }}; exit 1"
+            )
+        };
+        assert!(
+            wait_for_windows_powershell_condition(&event_script),
+            "Application log contains event {} for the {action} exit policy",
+            if action == "Ignore" { 1015 } else { 1016 }
+        );
         if action == "Ignore" {
             thread::sleep(Duration::from_millis(500));
             assert_eq!(
@@ -1695,6 +1733,54 @@ fn ignore_and_exit_actions_have_distinct_service_lifecycles() {
             );
         }
     }
+}
+
+#[test]
+fn suicide_exit_action_terminates_the_service_host_as_a_failure() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let installed = cli(&[
+        "install",
+        &service,
+        &command_prompt,
+        "/c",
+        "ping -n 2 127.0.0.1 >NUL & exit 23",
+    ]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "23", "Suicide"])
+            .status
+            .success()
+    );
+    let _ = cli(&["start", &service]);
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+
+    let escaped_service = service.replace('\'', "''");
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='System'; ProviderName='Service Control Manager'; Id=7034}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -gt 0 -and $event.Properties[0].Value -eq '{escaped_service}') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&script),
+        "SCM did not record event 7034 for the service host process terminated by Suicide"
+    );
+    let event_script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1020}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 23 -and $event.Properties[2].Value -eq 'Suicide') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event_script),
+        "Application log contains event 1020 with the Suicide policy and exit code"
+    );
 }
 
 #[test]
