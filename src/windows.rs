@@ -2055,6 +2055,34 @@ fn dump_native_settings(executable: &str, source: &str, target: &str) -> Result<
     let service = open_service(source, SERVICE_QUERY_CONFIG)?;
     let (storage, config) = query_service_config(service.0)?;
     let _storage_lifetime = storage;
+
+    // Keep the native setting order used by NSSM's settings table.
+    let dependencies = unsafe { dependency_list(config.lpDependencies) };
+    for groups in [true, false] {
+        let values = dependencies
+            .iter()
+            .filter(|value| value.starts_with('+') == groups)
+            .collect::<Vec<_>>();
+        for (index, dependency) in values.iter().enumerate() {
+            let edit = if index == 0 {
+                format!(":{dependency}")
+            } else {
+                format!("+{dependency}")
+            };
+            dump_set_line(
+                executable,
+                target,
+                if groups {
+                    "DependOnGroup"
+                } else {
+                    "DependOnService"
+                },
+                None,
+                &edit,
+            );
+        }
+    }
+
     let description = service_description(service.0)?;
     if !description.is_empty() {
         dump_set_line(executable, target, "Description", None, &description);
@@ -2069,6 +2097,18 @@ fn dump_native_settings(executable: &str, source: &str, target: &str) -> Result<
     if !display_name.is_empty() {
         dump_set_line(executable, target, "DisplayName", None, &display_name);
     }
+
+    let root = open_service_registry(source, false, KEY_QUERY_VALUE)?;
+    if let Some((kind, bytes)) = read_raw_value(root.0, Some("Environment"))? {
+        if kind != REG_MULTI_SZ {
+            return Err("service Environment is not REG_MULTI_SZ".into());
+        }
+        for (index, value) in decode_multi_string(&bytes)?.iter().enumerate() {
+            let edit = format!("{}{value}", if index == 0 { ':' } else { '+' });
+            dump_set_line(executable, target, "Environment", None, &edit);
+        }
+    }
+
     let account = wide_pointer(config.lpServiceStartName);
     if !account.is_empty() {
         let password = if account.eq_ignore_ascii_case("LocalSystem")
@@ -2126,48 +2166,6 @@ fn dump_native_settings(executable: &str, source: &str, target: &str) -> Result<
     dump_set_line(executable, target, "Start", None, startup);
     let service_type = service_type_name(config.dwServiceType);
     dump_set_line(executable, target, "Type", None, service_type);
-
-    let dependencies = unsafe { dependency_list(config.lpDependencies) };
-    for groups in [false, true] {
-        let values = dependencies
-            .iter()
-            .filter(|value| value.starts_with('+') == groups)
-            .collect::<Vec<_>>();
-        for (index, dependency) in values.iter().enumerate() {
-            let edit = if groups {
-                if index == 0 {
-                    format!(":{dependency}")
-                } else {
-                    format!("+{dependency}")
-                }
-            } else if index == 0 {
-                format!(":{dependency}")
-            } else {
-                format!("+{dependency}")
-            };
-            dump_set_line(
-                executable,
-                target,
-                if groups {
-                    "DependOnGroup"
-                } else {
-                    "DependOnService"
-                },
-                None,
-                &edit,
-            );
-        }
-    }
-    let root = open_service_registry(source, false, KEY_QUERY_VALUE)?;
-    if let Some((kind, bytes)) = read_raw_value(root.0, Some("Environment"))? {
-        if kind != REG_MULTI_SZ {
-            return Err("service Environment is not REG_MULTI_SZ".into());
-        }
-        for (index, value) in decode_multi_string(&bytes)?.iter().enumerate() {
-            let edit = format!("{}{value}", if index == 0 { ':' } else { '+' });
-            dump_set_line(executable, target, "Environment", None, &edit);
-        }
-    }
     Ok(())
 }
 
