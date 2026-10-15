@@ -1527,6 +1527,64 @@ fn missing_hook_executable_logs_event_and_does_not_abort_service_start() {
 }
 
 #[test]
+fn unreadable_hook_configuration_logs_event_1081_and_does_not_abort_service_start() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let installed = cli(&["install", &service, &command_prompt, "/c", "exit 0"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "0", "Ignore"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppEvents", "Start/Pre", &command_prompt])
+            .status
+            .success()
+    );
+
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let registry_path =
+        format!("SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters\\AppEvents\\Start");
+    let deny_system_read = format!(
+        "$path = '{registry_path}'; $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($path, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions); if ($null -eq $key) {{ throw 'Unable to open hook key for ACL update' }}; try {{ $acl = $key.GetAccessControl(); $rule = New-Object System.Security.AccessControl.RegistryAccessRule('NT AUTHORITY\\SYSTEM', [System.Security.AccessControl.RegistryRights]::ReadKey, [System.Security.AccessControl.InheritanceFlags]::ContainerInherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Deny); $acl.AddAccessRule($rule); $key.SetAccessControl($acl) }} finally {{ $key.Close() }}"
+    );
+    let permission = Command::new(&powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &deny_system_read,
+        ])
+        .output()
+        .expect("PowerShell sets the temporary hook registry permission");
+    assert!(
+        permission.status.success(),
+        "failed to deny SYSTEM read access to test hook key: {}",
+        String::from_utf8_lossy(&permission.stderr)
+    );
+
+    let _ = cli(&["start", &service]);
+    let event_script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1081}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -ge 3 -and $event.Properties[0].Value -eq 'Start' -and $event.Properties[1].Value -eq 'Pre' -and $event.Properties[2].Value -eq '{service}') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event_script),
+        "Application log contains event 1081 for the unreadable Start/Pre hook"
+    );
+    assert!(
+        wait_for_service_state(&service, "SERVICE_RUNNING"),
+        "an unreadable Start/Pre hook does not abort service startup"
+    );
+}
+
+#[test]
 fn identical_stdout_and_stderr_paths_share_the_stdout_file_settings() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());

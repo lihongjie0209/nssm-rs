@@ -203,10 +203,12 @@ then events 1051 and 1006 with the output setup failure and service-specific
 exit code. A Windows SCM test configures output under a missing directory and
 checks all three event records. Hook lookup and process creation failures now
 report events 1081 and 1080 respectively; a Windows SCM scenario verifies a
-missing Start/Pre executable does not abort service startup. The elevated local
-Windows run on 2026-10-15 passed the 1007, 1049/1051/1006, 1080, 1029/1030,
-1063, and identical stdout/stderr scenarios. Event 1081 and OS-level failure
-injection for events 1005, 1024/1025/1026/1044, and 1050 remain unverified.
+missing Start/Pre executable does not abort service startup. A second Windows
+SCM scenario denies SYSTEM read access to the isolated Start hook registry key
+and verifies event 1081 without aborting startup. The elevated local Windows
+run on 2026-10-15 passed the 1007, 1049/1051/1006, 1080/1081, 1029/1030,
+1063, and identical stdout/stderr scenarios. OS-level failure injection for
+events 1005, 1024/1025/1026/1044, and 1050 remains unverified.
 
 Missing `AppParameters` now logs warning 1029 and uses an empty argument list.
 Missing or empty `AppDirectory` logs warning 1030 and falls back to the
