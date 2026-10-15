@@ -168,8 +168,10 @@ mapping used by Power hooks, including the last application exit code when a
 Power event arrives between child processes. Windows `ControlService` does not expose
 `SERVICE_CONTROL_POWEREVENT` as a caller-sendable control, so injecting a real
 power broadcast into a service still requires an OS power event; actual system
-delivery and end-to-end propagation of the Power ABI into a launched hook remain
-unverified. A service launch
+delivery remains unverified. A Windows test invokes the SCM callback for a
+Resume event, launches the configured asynchronous hook, and checks the
+`NSSM_EVENT`, `NSSM_ACTION`, `NSSM_TRIGGER`, `NSSM_LAST_CONTROL` and
+`NSSM_EXITCODE` values received by the child. A service launch
 integration test also copies the child fixture under a Unicode executable path,
 passes Unicode arguments containing spaces, quotes, trailing backslashes, and an
 empty argument, then checks the child's exact received argument list. Another
@@ -177,8 +179,8 @@ service integration test queries the child process after launch and verifies
 that configured priority class and CPU affinity are effective at runtime. The
 SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
-acceptance scope includes system-level Power event delivery and end-to-end hook
-ABI propagation; Windows verification of events 1024, 1025, 1026, 1044 and
+acceptance scope includes system-level Power event delivery; Windows
+verification of events 1024, 1025, 1026, 1044 and
 1050; and event-log compatibility
 beyond events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1020, 1021, 1034,
 1035, 1040, 1041, 1072 and 1077,

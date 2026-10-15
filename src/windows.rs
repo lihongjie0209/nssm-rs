@@ -5345,14 +5345,18 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 mod tests {
     use super::{
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
-        EVENT_SERVICE_CONTROL_UNKNOWN, HookAbiContext, PBT_APMPOWERSTATUSCHANGE,
-        PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CONTROL_PAUSE,
-        elevation_arguments, elevation_parameters, ensure_event_source, hook_abi_environment,
-        hook_deadline_ms, hook_exit_code, hook_trigger, parse_u32, power_hook_action,
-        power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
-        process_open_error_output, quote_dump_arg, service_control_event, service_main,
-        service_type_name, valid_hook, wide,
+        EVENT_SERVICE_CONTROL_UNKNOWN, HOOK_LAST_APPLICATION_EXIT_CODE, HookAbiContext,
+        PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation,
+        SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT,
+        elevation_arguments, elevation_parameters, ensure_event_source, finish_async_hooks,
+        hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger, install, parse_u32,
+        power_hook_action, power_hook_invocation, priority_name, priority_value,
+        process_belongs_to_service_lifetime, process_open_error_output, quote_dump_arg, remove,
+        service_control_event, service_handler, service_main, service_type_name, set_setting,
+        valid_hook, wide,
     };
+
+    static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct TestDirectory(std::path::PathBuf);
 
@@ -5374,6 +5378,41 @@ mod tests {
     impl Drop for TestDirectory {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct TestService {
+        name: String,
+        last_control: u32,
+        last_exit_code: u32,
+        child_environment: Vec<String>,
+    }
+
+    impl TestService {
+        fn new(name: String) -> Self {
+            Self {
+                name,
+                last_control: super::HOOK_LAST_CONTROL.load(std::sync::atomic::Ordering::SeqCst),
+                last_exit_code: HOOK_LAST_APPLICATION_EXIT_CODE
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                child_environment: SERVICE_CHILD_ENVIRONMENT
+                    .lock()
+                    .map(|environment| environment.clone())
+                    .unwrap_or_default(),
+            }
+        }
+    }
+
+    impl Drop for TestService {
+        fn drop(&mut self) {
+            finish_async_hooks();
+            if let Ok(mut environment) = SERVICE_CHILD_ENVIRONMENT.lock() {
+                *environment = std::mem::take(&mut self.child_environment);
+            }
+            HOOK_LAST_APPLICATION_EXIT_CODE
+                .store(self.last_exit_code, std::sync::atomic::Ordering::SeqCst);
+            super::HOOK_LAST_CONTROL.store(self.last_control, std::sync::atomic::Ordering::SeqCst);
+            let _ = remove(&self.name, true);
         }
     }
 
@@ -5478,6 +5517,9 @@ mod tests {
 
     #[test]
     fn service_main_reports_event_1005_when_handler_registration_fails() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .expect("Windows event tests are serialized");
         ensure_event_source().expect("test runner can register the NSSM event source");
         let service_name = format!(
             "NssmRsHandlerFailure{}{}",
@@ -5519,6 +5561,65 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         panic!("Application log contains event 1005 for handler registration failure");
+    }
+
+    #[test]
+    fn power_callback_launches_resume_hook_with_the_nssm_environment() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .expect("Windows event tests are serialized");
+        let service = format!(
+            "NssmRsPowerCallback{}{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time is after the Unix epoch")
+                .as_millis()
+        );
+        let _cleanup = TestService::new(service.clone());
+        let application = std::env::current_exe()
+            .expect("test executable path is available")
+            .to_string_lossy()
+            .into_owned();
+        install(&service, Some(&application), &[])
+            .expect("temporary service configuration is installed");
+
+        let directory = TestDirectory::new();
+        let output = directory.0.join("power-hook-environment.txt");
+        let output = output.to_string_lossy().replace('\'', "''");
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+        let script = format!(
+            "[IO.File]::WriteAllLines('{output}', @($env:NSSM_EVENT, $env:NSSM_ACTION, $env:NSSM_TRIGGER, $env:NSSM_LAST_CONTROL, $env:NSSM_EXITCODE))"
+        );
+        let command = format!("\"{powershell}\" -NoProfile -NonInteractive -Command \"{script}\"");
+        set_setting(&service, "AppEvents", &["Power/Resume".into(), command])
+            .expect("Power/Resume hook is configured");
+        *SERVICE_CHILD_ENVIRONMENT
+            .lock()
+            .expect("service environment lock is available") = std::env::vars_os()
+            .map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy()))
+            .collect();
+        HOOK_LAST_APPLICATION_EXIT_CODE.store(23, std::sync::atomic::Ordering::SeqCst);
+
+        let service_name = wide(std::ffi::OsStr::new(&service));
+        let result = unsafe {
+            service_handler(
+                SERVICE_CONTROL_POWEREVENT,
+                PBT_APMRESUMEAUTOMATIC,
+                std::ptr::null_mut(),
+                service_name.as_ptr().cast_mut().cast(),
+            )
+        };
+        assert_eq!(result, windows_sys::Win32::Foundation::NO_ERROR);
+        finish_async_hooks();
+
+        let output = std::fs::read_to_string(output)
+            .expect("Power callback starts a hook that writes its ABI environment");
+        assert_eq!(
+            output.lines().collect::<Vec<_>>(),
+            ["Power", "Resume", "POWEREVENT", "POWEREVENT", "23"]
+        );
     }
 
     #[test]
