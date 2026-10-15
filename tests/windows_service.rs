@@ -448,6 +448,75 @@ fn redirects_child_stdout_and_stderr_to_configured_files() {
 }
 
 #[test]
+fn passes_replacement_and_expanded_extra_environment_to_child() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let stdout_path = std::env::temp_dir().join(format!("{service}_environment.txt"));
+    let stdout_path = stdout_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![stdout_path.clone()]);
+    let installed = cli(&[
+        "install",
+        &service,
+        &command_prompt,
+        "/c",
+        "echo %NSSMR_BASE%:%NSSMR_DERIVED%",
+    ]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppEnvironment", "NSSMR_BASE=base"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&[
+            "set",
+            &service,
+            "AppEnvironmentExtra",
+            "NSSMR_DERIVED=%NSSMR_BASE%-extra",
+        ])
+        .status
+        .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppStdout", &stdout_path])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let mut completed = false;
+    for _ in 0..100 {
+        completed = cli(&["status", &service]).status.success()
+            && std::fs::read_to_string(&stdout_path)
+                .is_ok_and(|contents| contents.trim() == "base:base-extra");
+        if completed {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        completed,
+        "child did not receive the composed environment: {:?}",
+        std::fs::read_to_string(&stdout_path)
+    );
+}
+
+#[test]
 fn timestamp_log_prefixes_each_child_output_line_in_utc() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
