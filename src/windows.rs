@@ -2052,13 +2052,12 @@ fn list_services(include_native: bool) -> Result<(), String> {
 #[derive(Clone)]
 struct ProcessEntry {
     pid: u32,
-    name: String,
 }
 
-fn process_image(pid: u32, fallback: &str) -> String {
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+fn process_image(pid: u32) -> io::Result<String> {
+    let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
     if process.is_null() {
-        return fallback.to_owned();
+        return Err(io::Error::last_os_error());
     }
     let mut path = vec![0u16; 32768];
     let mut size = path.len() as u32;
@@ -2069,9 +2068,9 @@ fn process_image(pid: u32, fallback: &str) -> String {
         CloseHandle(process);
     }
     if ok == 0 {
-        fallback.to_owned()
+        Ok("???".to_owned())
     } else {
-        String::from_utf16_lossy(&path[..size as usize])
+        Ok(String::from_utf16_lossy(&path[..size as usize]))
     }
 }
 
@@ -2095,6 +2094,13 @@ fn process_tree(service: &str) -> Result<(), String> {
     if root == 0 {
         return Ok(());
     }
+    let root_image = match process_image(root) {
+        Ok(image) => image,
+        Err(error) => {
+            eprintln!("{service}: {root}: {error}");
+            return Ok(());
+        }
+    };
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
         return Err(io::Error::last_os_error().to_string());
@@ -2104,17 +2110,11 @@ fn process_tree(service: &str) -> Result<(), String> {
     entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
     while ok != 0 {
-        let length = entry
-            .szExeFile
-            .iter()
-            .position(|ch| *ch == 0)
-            .unwrap_or(entry.szExeFile.len());
         processes
             .entry(entry.th32ParentProcessID)
             .or_default()
             .push(ProcessEntry {
                 pid: entry.th32ProcessID,
-                name: String::from_utf16_lossy(&entry.szExeFile[..length]),
             });
         ok = unsafe { Process32NextW(snapshot, &mut entry) };
     }
@@ -2124,25 +2124,28 @@ fn process_tree(service: &str) -> Result<(), String> {
     fn visit(
         pid: u32,
         depth: usize,
-        name: &str,
+        root_image: Option<&str>,
         tree: &HashMap<u32, Vec<ProcessEntry>>,
         seen: &mut HashSet<u32>,
     ) {
         if !seen.insert(pid) {
             return;
         }
-        println!(
-            "{pid:>8} {}{}\r",
-            " ".repeat(depth),
-            process_image(pid, name)
-        );
+        let image = if depth == 0 {
+            root_image.map(str::to_owned)
+        } else {
+            process_image(pid).ok()
+        };
+        if let Some(image) = image {
+            println!("{pid:>8} {}{image}\r", " ".repeat(depth));
+        }
         if let Some(children) = tree.get(&pid) {
             for child in children {
-                visit(child.pid, depth + 1, &child.name, tree, seen);
+                visit(child.pid, depth + 1, None, tree, seen);
             }
         }
     }
-    visit(root, 0, "???", &processes, &mut HashSet::new());
+    visit(root, 0, Some(&root_image), &processes, &mut HashSet::new());
     Ok(())
 }
 
