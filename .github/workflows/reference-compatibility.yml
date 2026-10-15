@@ -39,3 +39,10 @@ jobs:
           pwsh -NoProfile -NonInteractive -File tests/reference_readonly_sweep.ps1
           -ReferenceBinary "$env:NSSM_REFERENCE_BINARY"
           -CandidateBinary "target/debug/nssm-rs.exe"
+
+      - name: Compare disposable service lifecycle
+        shell: pwsh
+        run: >-
+          pwsh -NoProfile -NonInteractive -File tests/reference_service_lifecycle.ps1
+          -ReferenceBinary "$env:NSSM_REFERENCE_BINARY"
+          -CandidateBinary "target/debug/nssm-rs.exe"
