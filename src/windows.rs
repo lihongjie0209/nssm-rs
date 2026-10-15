@@ -100,6 +100,8 @@ const EVENT_KILL_PROCESS_TREE: u32 = 0x4000_0403;
 const EVENT_BOGUS_PRIORITY: u32 = 0x4000_042a;
 const EVENT_BOGUS_AFFINITY_MASK: u32 = 0x8000_042b;
 const EVENT_EFFECTIVE_AFFINITY_MASK: u32 = 0x8000_042c;
+const EVENT_GET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0x8000_042d;
+const EVENT_SET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0xc000_042e;
 const PRIORITY_CLASS_MASK: u32 = 0x0000_c1e0;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
@@ -2038,6 +2040,74 @@ fn assign_to_kill_on_close_job(
         child,
         job: job as isize,
     })
+}
+
+fn resume_suspended_child(process_id: u32) -> Result<(), String> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(windows_error_message(&io::Error::last_os_error()));
+    }
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    let thread_id = loop {
+        if !more {
+            break None;
+        }
+        if entry.th32OwnerProcessID == process_id {
+            break Some(entry.th32ThreadID);
+        }
+        more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    };
+    unsafe { CloseHandle(snapshot) };
+    let Some(thread_id) = thread_id else {
+        return Err(format!("no primary thread found for process {process_id}"));
+    };
+    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    if thread.is_null() {
+        return Err(windows_error_message(&io::Error::last_os_error()));
+    }
+    let result = unsafe { ResumeThread(thread) };
+    unsafe { CloseHandle(thread) };
+    if result == u32::MAX {
+        return Err(windows_error_message(&io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+fn configure_child_affinity(service: &str, process: HANDLE, affinity: Option<&str>) {
+    let Some(affinity) = affinity else {
+        return;
+    };
+    let Ok(requested) = parse_cpu_affinity(affinity) else {
+        return;
+    };
+    if requested == 0 {
+        return;
+    }
+    let (mut process_mask, mut system_mask) = (0usize, 0usize);
+    let mask =
+        if unsafe { GetProcessAffinityMask(process, &mut process_mask, &mut system_mask) } != 0 {
+            requested as usize & system_mask
+        } else {
+            let error = windows_error_message(&io::Error::last_os_error());
+            report_event(
+                windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                EVENT_GET_PROCESS_AFFINITY_MASK_FAILED,
+                &[service, &error],
+            );
+            requested as usize
+        };
+    if unsafe { SetProcessAffinityMask(process, mask) } == 0 {
+        let error = windows_error_message(&io::Error::last_os_error());
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_SET_PROCESS_AFFINITY_MASK_FAILED,
+            &[service, &error],
+        );
+    }
 }
 
 fn wide(s: &OsStr) -> Vec<u16> {
@@ -4818,20 +4888,27 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             .stdin(redirected_stdin)
             .stdout(redirected_stdout)
             .stderr(redirected_stderr);
+        let mut creation_flags = priority & PRIORITY_CLASS_MASK;
         if no_console {
-            command.creation_flags(CREATE_NO_WINDOW);
+            creation_flags |= CREATE_NO_WINDOW;
         } else {
             // Keep the child in the console's default process group so a
             // CTRL_C_EVENT sent with group id 0 reaches its handler.
-            let mut flags = 0;
             if read_reg_dword(&service_name, "AppStopMethodSkip", 0).unwrap_or(0)
                 & STOP_SKIP_CONSOLE
                 == 0
             {
-                flags |= CREATE_NEW_CONSOLE;
+                creation_flags |= CREATE_NEW_CONSOLE;
             }
-            command.creation_flags(flags);
         }
+        let explicit_affinity = affinity
+            .as_deref()
+            .and_then(|value| parse_cpu_affinity(value).ok())
+            .is_some_and(|mask| mask != 0);
+        if explicit_affinity {
+            creation_flags |= CREATE_SUSPENDED;
+        }
+        command.creation_flags(creation_flags);
         command.current_dir(&directory);
         if app_environment.is_some() {
             command.env_clear();
@@ -4915,13 +4992,30 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 log_stream(pipe, destination, timestamp_stderr)
             }));
         }
-        let launched = match assign_to_kill_on_close_job(process, kill_process_tree) {
+        let mut launched = match assign_to_kill_on_close_job(process, kill_process_tree) {
             Ok(launched) => launched,
             Err(_) => {
                 set_status(SERVICE_STOPPED, 2, 0);
                 return;
             }
         };
+        let process_handle = launched.child.as_raw_handle() as HANDLE;
+        configure_child_affinity(&service_name, process_handle, affinity.as_deref());
+        if explicit_affinity && let Err(error) = resume_suspended_child(launched.child.id()) {
+            let _ = launched.child.kill();
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_CREATEPROCESS_FAILED,
+                &[&service_name, &app, &error],
+            );
+            set_status_with_service_exit(
+                SERVICE_STOPPED,
+                windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                SERVICE_LAUNCH_FAILURE_CODE,
+                0,
+            );
+            return;
+        }
         application_started = true;
         if let Ok(mut child) = CHILD_PROCESS.lock() {
             *child = Some(launched);
@@ -4944,32 +5038,6 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             false,
             false,
         );
-        if let Ok(child) = CHILD_PROCESS.lock()
-            && let Some(child) = child.as_ref()
-        {
-            let process = child.child.as_raw_handle() as HANDLE;
-            unsafe {
-                SetPriorityClass(process, priority);
-            }
-            if let Some(affinity) = affinity.as_deref()
-                && let Ok(mask) = parse_cpu_affinity(affinity)
-                && mask != 0
-            {
-                let mut process_mask = 0usize;
-                let mut system_mask = 0usize;
-                if unsafe {
-                    GetProcessAffinityMask(GetCurrentProcess(), &mut process_mask, &mut system_mask)
-                } != 0
-                {
-                    let effective = mask as usize & system_mask;
-                    if effective != 0 {
-                        unsafe {
-                            SetProcessAffinityMask(process, effective);
-                        }
-                    }
-                }
-            }
-        }
         let child_started = Instant::now();
         set_status(SERVICE_RUNNING, 0, 0);
         let parameters = read_optional_reg_string(&service_name, "AppParameters")
@@ -5629,20 +5697,21 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, EVENT_OPENSCMANAGER_FAILED, EVENT_SERVICE_CONTROL_HANDLED,
-        EVENT_SERVICE_CONTROL_NOT_HANDLED, EVENT_SERVICE_CONTROL_UNKNOWN,
+        Command, EVENT_GET_PROCESS_AFFINITY_MASK_FAILED, EVENT_OPENSCMANAGER_FAILED,
+        EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
+        EVENT_SERVICE_CONTROL_UNKNOWN, EVENT_SET_PROCESS_AFFINITY_MASK_FAILED,
         FAIL_NEXT_PROCESS_ENUMERATION, FAIL_NEXT_PROCESS_SNAPSHOT, FAIL_NEXT_PROCESS_TIMES,
         FAIL_NEXT_STDIO_DUPLICATE, FAIL_OPEN_PROCESS_PID, HOOK_LAST_APPLICATION_EXIT_CODE,
         HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
         PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTROL_PAUSE,
-        SERVICE_CONTROL_POWEREVENT, StdioFileError, dump_open_service_error, duplicate_stdio_file,
-        elevation_arguments, elevation_parameters, ensure_event_source, finish_async_hooks,
-        hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger, install,
-        is_administrator, open_manager, parse_u32, power_hook_action, power_hook_invocation,
-        priority_name, priority_value, process_belongs_to_service_lifetime,
-        process_open_error_output, process_tree_from_root, quote_dump_arg, remove,
-        report_stdio_setup_failure, service_control_event, service_handler, service_main,
-        service_type_name, set_setting, valid_hook, valid_priority_class, wide,
+        SERVICE_CONTROL_POWEREVENT, StdioFileError, configure_child_affinity,
+        dump_open_service_error, duplicate_stdio_file, elevation_arguments, elevation_parameters,
+        ensure_event_source, finish_async_hooks, hook_abi_environment, hook_deadline_ms,
+        hook_exit_code, hook_trigger, install, is_administrator, open_manager, parse_u32,
+        power_hook_action, power_hook_invocation, priority_name, priority_value,
+        process_belongs_to_service_lifetime, process_open_error_output, process_tree_from_root,
+        quote_dump_arg, remove, report_stdio_setup_failure, service_control_event, service_handler,
+        service_main, service_type_name, set_setting, valid_hook, valid_priority_class, wide,
     };
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -5682,6 +5751,25 @@ mod tests {
         if let Some(before) = event_record {
             wait_for_event(&powershell_path(), event_id, before, "");
         }
+    }
+
+    #[test]
+    fn affinity_api_failures_report_reference_events_1069_and_1070() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .expect("Windows event tests are serialized");
+        ensure_event_source().expect("test runner can register the NSSM event source");
+        let powershell = powershell_path();
+        let get_event = EVENT_GET_PROCESS_AFFINITY_MASK_FAILED & 0xffff;
+        let set_event = EVENT_SET_PROCESS_AFFINITY_MASK_FAILED & 0xffff;
+        let get_before = latest_event_record(&powershell, get_event);
+        let set_before = latest_event_record(&powershell, set_event);
+        let service = "NssmRsAffinityApiFailureTest";
+
+        configure_child_affinity(service, super::INVALID_HANDLE_VALUE, Some("0"));
+
+        wait_for_event(&powershell, get_event, get_before, service);
+        wait_for_event(&powershell, set_event, set_before, service);
     }
 
     fn wait_for_event(powershell: &str, event_id: u32, after: u64, text: &str) {
