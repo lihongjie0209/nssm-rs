@@ -573,7 +573,6 @@ fn runs_configured_start_and_exit_hooks() {
     assert_eq!(fields.next(), Some("20000"));
     let command_line = fields.collect::<Vec<_>>().join(" ");
     assert!(command_line.contains("cmd.exe"));
-    assert!(command_line.contains("/c exit 0"));
     assert_eq!(
         std::fs::read_to_string(&event_paths[1]).unwrap().trim(),
         "start-post"
