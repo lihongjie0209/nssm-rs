@@ -228,7 +228,7 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     Add-Result $results $Binary 'get Type after rejected reset' `
         @('get', $Service, 'Type') | Out-Null
     Add-Result $results $Binary 'set Environment' `
-        @('set', $Service, 'Environment', '+NSSMR_NATIVE=value') @(0, 6) | Out-Null
+        @('set', $Service, 'Environment', 'NSSMR_NATIVE=value') @(0, 6) | Out-Null
     Add-Result $results $Binary 'get Environment key' `
         @('get', $Service, 'Environment', 'NSSMR_NATIVE') | Out-Null
     Add-Result $results $Binary 'reset Environment' `
