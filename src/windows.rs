@@ -3278,6 +3278,46 @@ fn read_reg_dword(service: &str, value: &str, default: u32) -> Result<u32, Strin
     Ok(data)
 }
 
+fn read_number_or_default(service: &str, value: &str, default: u32) -> u32 {
+    let key = match open_registry_key(service, "", false, KEY_QUERY_VALUE) {
+        Ok(key) => key,
+        Err(error) => {
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_QUERYVALUE_FAILED,
+                &[value, &error],
+            );
+            return default;
+        }
+    };
+    let value_name = wide(OsStr::new(value));
+    let mut kind = REG_DWORD;
+    let mut data = default;
+    let mut bytes = std::mem::size_of::<u32>() as u32;
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            value_name.as_ptr(),
+            ptr::null(),
+            &mut kind,
+            (&mut data as *mut u32).cast(),
+            &mut bytes,
+        )
+    };
+    if code == 0 {
+        return data;
+    }
+    if code != 2 {
+        let error = registry_error(code);
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_QUERYVALUE_FAILED,
+            &[value, &error],
+        );
+    }
+    default
+}
+
 fn read_milliseconds_override(
     service: &str,
     value: &str,
@@ -4460,7 +4500,7 @@ fn invoke_hook(
         deadline: deadline_ms,
     };
     command.envs(hook_abi_environment(hook_context));
-    if read_reg_dword(service, "AppRedirectHook", 0)? != 0 {
+    if read_number_or_default(service, "AppRedirectHook", 0) != 0 {
         let stdout = open_hook_stdio_file(service, "AppStdout", child_environment)?;
         let stderr = open_hook_stdio_file(service, "AppStderr", child_environment)?;
         if let Some(stdout) = stdout {
@@ -4833,7 +4873,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             },
             value => value,
         };
-        let configured_priority = read_reg_dword(&service_name, "AppPriority", 0x20)?;
+        let configured_priority = read_number_or_default(&service_name, "AppPriority", 0x20);
         let priority = if valid_priority_class(configured_priority) {
             configured_priority
         } else {
@@ -4845,8 +4885,8 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             0x20
         };
         let stop_method_skip = read_stop_method_skip(&service_name);
-        let no_console = read_reg_dword(&service_name, "AppNoConsole", 0)? != 0;
-        let kill_process_tree = read_reg_dword(&service_name, "AppKillProcessTree", 1)? != 0;
+        let no_console = read_number_or_default(&service_name, "AppNoConsole", 0) != 0;
+        let kill_process_tree = read_number_or_default(&service_name, "AppKillProcessTree", 1) != 0;
         Ok(ServiceConfig {
             app,
             args,
@@ -4891,13 +4931,13 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         0,
         EVENT_BOGUS_RESTART_DELAY,
     );
-    let rotate_files = read_reg_dword(&service_name, "AppRotateFiles", 0).unwrap_or(0) != 0;
-    let rotate_online = read_reg_dword(&service_name, "AppRotateOnline", 0).unwrap_or(0) != 0;
+    let rotate_files = read_number_or_default(&service_name, "AppRotateFiles", 0) != 0;
+    let rotate_online = read_number_or_default(&service_name, "AppRotateOnline", 0) != 0;
     ROTATE_ENABLED.store(rotate_online, Ordering::SeqCst);
     ROTATE_REQUESTED.store(false, Ordering::SeqCst);
-    let rotate_seconds = read_reg_dword(&service_name, "AppRotateSeconds", 0).unwrap_or(0);
-    let rotate_low = read_reg_dword(&service_name, "AppRotateBytes", 0).unwrap_or(0) as u64;
-    let rotate_high = read_reg_dword(&service_name, "AppRotateBytesHigh", 0).unwrap_or(0) as u64;
+    let rotate_seconds = read_number_or_default(&service_name, "AppRotateSeconds", 0);
+    let rotate_low = read_number_or_default(&service_name, "AppRotateBytes", 0) as u64;
+    let rotate_high = read_number_or_default(&service_name, "AppRotateBytesHigh", 0) as u64;
     let rotate_size = (rotate_high << 32) | rotate_low;
     let rotate_delay = Duration::from_millis(read_milliseconds_override(
         &service_name,
@@ -4919,10 +4959,10 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         }
     };
     let stdout_copy_and_truncate =
-        read_reg_dword(&service_name, "AppStdoutCopyAndTruncate", 0).unwrap_or(0) != 0;
+        read_number_or_default(&service_name, "AppStdoutCopyAndTruncate", 0) != 0;
     let stderr_copy_and_truncate =
-        read_reg_dword(&service_name, "AppStderrCopyAndTruncate", 0).unwrap_or(0) != 0;
-    let timestamp_log = read_reg_dword(&service_name, "AppTimestampLog", 0).unwrap_or(0) != 0;
+        read_number_or_default(&service_name, "AppStderrCopyAndTruncate", 0) != 0;
+    let timestamp_log = read_number_or_default(&service_name, "AppTimestampLog", 0) != 0;
     let mut throttle = nssm_rs::RestartThrottle::new(restart_delay_ms);
     let mut stop_hook_invoked = false;
     let mut stop_process_handled = false;

@@ -2334,7 +2334,7 @@ fn invalid_runtime_registry_values_log_events_and_fall_back_to_defaults() {
 
     let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
     let write_invalid_priority = format!(
-        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppPriority -PropertyType DWord -Value 65536 -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppAffinity -PropertyType String -Value 'not-a-cpu-range' -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppThrottle -PropertyType String -Value 'invalid-throttle' -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppRestartDelay -PropertyType String -Value 'invalid-delay' -Force"
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppPriority -PropertyType DWord -Value 65536 -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppAffinity -PropertyType String -Value 'not-a-cpu-range' -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppThrottle -PropertyType String -Value 'invalid-throttle' -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppRestartDelay -PropertyType String -Value 'invalid-delay' -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppNoConsole -PropertyType String -Value 'invalid-no-console' -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppKillProcessTree -PropertyType String -Value 'invalid-kill-tree' -Force"
     );
     let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
@@ -2393,6 +2393,15 @@ fn invalid_runtime_registry_values_log_events_and_fall_back_to_defaults() {
         wait_for_windows_powershell_condition(&event),
         "invalid AppRestartDelay falls back to 0 ms and logs event 1071"
     );
+    for setting in ["AppNoConsole", "AppKillProcessTree"] {
+        let event = format!(
+            "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1018}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{setting}') {{ exit 0 }} }}; exit 1"
+        );
+        assert!(
+            wait_for_windows_powershell_condition(&event),
+            "invalid {setting} type logs event 1018 and uses the setting default"
+        );
+    }
 }
 
 #[test]
