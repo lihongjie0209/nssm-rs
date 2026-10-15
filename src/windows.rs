@@ -4451,11 +4451,41 @@ fn set_status(state: u32, exit_code: u32, wait_hint: u32) {
     set_status_with_service_exit(state, exit_code, 0, wait_hint);
 }
 
+fn status_controls_accepted(state: u32) -> u32 {
+    match state {
+        SERVICE_RUNNING => application_start_pending_controls(),
+        SERVICE_PAUSED | SERVICE_CONTINUE_PENDING => {
+            application_start_pending_controls() | SERVICE_ACCEPT_PAUSE_CONTINUE
+        }
+        _ => 0,
+    }
+}
+
+fn application_start_pending_controls() -> u32 {
+    SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT
+}
+
 fn set_status_with_service_exit(
     state: u32,
     win32_exit_code: u32,
     service_exit_code: u32,
     wait_hint: u32,
+) {
+    set_status_with_controls(
+        state,
+        win32_exit_code,
+        service_exit_code,
+        wait_hint,
+        status_controls_accepted(state),
+    );
+}
+
+fn set_status_with_controls(
+    state: u32,
+    win32_exit_code: u32,
+    service_exit_code: u32,
+    wait_hint: u32,
+    controls_accepted: u32,
 ) {
     let handle = SERVICE_STATUS_HANDLE_VALUE.load(Ordering::SeqCst) as SERVICE_STATUS_HANDLE;
     if handle.is_null() {
@@ -4464,18 +4494,7 @@ fn set_status_with_service_exit(
     let status = SERVICE_STATUS {
         dwServiceType: SERVICE_WIN32_OWN_PROCESS,
         dwCurrentState: state,
-        dwControlsAccepted: match state {
-            SERVICE_RUNNING | SERVICE_START_PENDING => {
-                SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT
-            }
-            SERVICE_PAUSED | SERVICE_CONTINUE_PENDING => {
-                SERVICE_ACCEPT_STOP
-                    | SERVICE_ACCEPT_SHUTDOWN
-                    | SERVICE_ACCEPT_POWEREVENT
-                    | SERVICE_ACCEPT_PAUSE_CONTINUE
-            }
-            _ => 0,
-        },
+        dwControlsAccepted: controls_accepted,
         dwWin32ExitCode: win32_exit_code,
         dwServiceSpecificExitCode: service_exit_code,
         dwCheckPoint: 0,
@@ -4484,6 +4503,16 @@ fn set_status_with_service_exit(
     unsafe {
         SetServiceStatus(handle, &status);
     }
+}
+
+fn set_status_for_application_start() {
+    set_status_with_controls(
+        SERVICE_START_PENDING,
+        0,
+        0,
+        10_000,
+        application_start_pending_controls(),
+    );
 }
 
 unsafe extern "system" fn service_handler(
@@ -4833,7 +4862,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     let mut application_started = false;
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
         HOOK_START_REQUESTED_COUNT.fetch_add(1, Ordering::SeqCst);
-        set_status(SERVICE_START_PENDING, 0, 10_000);
+        set_status_for_application_start();
         let same_output_path = stdout_path
             .as_deref()
             .zip(stderr_path.as_deref())
@@ -5932,18 +5961,39 @@ mod tests {
         FAIL_NEXT_PROCESS_ENUMERATION, FAIL_NEXT_PROCESS_SNAPSHOT, FAIL_NEXT_PROCESS_TIMES,
         FAIL_NEXT_STDIO_DUPLICATE, FAIL_OPEN_PROCESS_PID, HOOK_LAST_APPLICATION_EXIT_CODE,
         HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTROL_PAUSE,
-        SERVICE_CONTROL_POWEREVENT, StdioFileError, configure_child_affinity,
+        PowerHookAction, PowerHookInvocation, SERVICE_ACCEPT_PAUSE_CONTINUE,
+        SERVICE_ACCEPT_POWEREVENT, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
+        SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTINUE_PENDING, SERVICE_CONTROL_PAUSE,
+        SERVICE_CONTROL_POWEREVENT, SERVICE_PAUSED, SERVICE_RUNNING, SERVICE_START_PENDING,
+        StdioFileError, application_start_pending_controls, configure_child_affinity,
         dump_open_service_error, duplicate_stdio_file, elevation_arguments, elevation_parameters,
         ensure_event_source, finish_async_hooks, hook_abi_environment, hook_deadline_ms,
         hook_exit_code, hook_trigger, install, is_administrator, open_manager, parse_u32,
         power_hook_action, power_hook_invocation, priority_name, priority_value,
         process_belongs_to_service_lifetime, process_open_error_output, process_tree_from_root,
         quote_dump_arg, remove, report_stdio_setup_failure, service_control_event, service_handler,
-        service_main, service_type_name, set_setting, valid_hook, valid_priority_class, wide,
+        service_main, service_type_name, set_setting, status_controls_accepted, valid_hook,
+        valid_priority_class, wide,
     };
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn service_control_acceptance_matches_nssm_startup_phases() {
+        let running_controls =
+            SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT;
+        assert_eq!(status_controls_accepted(SERVICE_START_PENDING), 0);
+        assert_eq!(application_start_pending_controls(), running_controls);
+        assert_eq!(status_controls_accepted(SERVICE_RUNNING), running_controls);
+        assert_eq!(
+            status_controls_accepted(SERVICE_PAUSED),
+            running_controls | SERVICE_ACCEPT_PAUSE_CONTINUE
+        );
+        assert_eq!(
+            status_controls_accepted(SERVICE_CONTINUE_PENDING),
+            running_controls | SERVICE_ACCEPT_PAUSE_CONTINUE
+        );
+    }
 
     fn powershell_path() -> String {
         let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
