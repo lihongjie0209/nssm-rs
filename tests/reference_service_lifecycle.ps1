@@ -399,6 +399,13 @@ for ($index = 0; $index -lt $referenceResults.Count; $index++) {
         $candidateStderr = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($candidate.Stderr))
         $referenceStderrHex = [BitConverter]::ToString([Convert]::FromBase64String($reference.Stderr))
         $candidateStderrHex = [BitConverter]::ToString([Convert]::FromBase64String($candidate.Stderr))
+        if ($reference.Label -eq 'dump configured service') {
+            $referenceLines = @($referenceStdout -split "`r?`n" | Where-Object { $_ })
+            $candidateLines = @($candidateStdout -split "`r?`n" | Where-Object { $_ })
+            foreach ($difference in Compare-Object $referenceLines $candidateLines) {
+                Write-Host "Dump difference $($difference.SideIndicator): $($difference.InputObject)"
+            }
+        }
         throw "Lifecycle mismatch at $($reference.Label): reference exit=$($reference.ExitCode), candidate exit=$($candidate.ExitCode)`nReference stdout: [$referenceStdout]`nCandidate stdout: [$candidateStdout]`nReference stderr: [$referenceStderr]`nReference stderr hex: [$referenceStderrHex]`nCandidate stderr: [$candidateStderr]`nCandidate stderr hex: [$candidateStderrHex]"
     }
     Write-Host "$($reference.Label): match (exit $($reference.ExitCode))"
