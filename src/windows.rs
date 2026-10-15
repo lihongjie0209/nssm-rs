@@ -25,8 +25,10 @@ use windows_sys::Win32::{
         CloseHandle, ERROR_NO_MORE_ITEMS, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM,
         NO_ERROR, WPARAM,
     },
+    Globalization::WideCharToMultiByte,
     System::Console::{
-        AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+        AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleMode,
+        GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCtrlHandler, WriteConsoleW,
     },
     System::{
         Diagnostics::ToolHelp::*,
@@ -71,6 +73,91 @@ const EVENT_SERVICE_CONTROL_UNKNOWN: u32 = 0x4000_0412;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
+// NSSM's MSVC CRT uses the default "C" locale for redirected wide output.
+const NSSM_C_LOCALE_CODE_PAGE: u32 = 1252;
+const WC_NO_BEST_FIT_CHARS: u32 = 0x0000_0400;
+fn write_cli_output(text: &str, is_error: bool) {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let handle = unsafe {
+        GetStdHandle(if is_error {
+            STD_ERROR_HANDLE
+        } else {
+            STD_OUTPUT_HANDLE
+        })
+    };
+    if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+        let mut mode = 0;
+        if unsafe { GetConsoleMode(handle, &mut mode) } != 0 {
+            let mut written = 0;
+            unsafe {
+                WriteConsoleW(
+                    handle,
+                    wide.as_ptr(),
+                    wide.len() as u32,
+                    &mut written,
+                    ptr::null(),
+                );
+            }
+            return;
+        }
+    }
+
+    let required = unsafe {
+        WideCharToMultiByte(
+            NSSM_C_LOCALE_CODE_PAGE,
+            WC_NO_BEST_FIT_CHARS,
+            wide.as_ptr(),
+            wide.len() as i32,
+            ptr::null_mut(),
+            0,
+            ptr::null(),
+            ptr::null_mut(),
+        )
+    };
+    if required <= 0 {
+        return;
+    }
+    let mut bytes = vec![0; required as usize];
+    let written = unsafe {
+        WideCharToMultiByte(
+            NSSM_C_LOCALE_CODE_PAGE,
+            WC_NO_BEST_FIT_CHARS,
+            wide.as_ptr(),
+            wide.len() as i32,
+            bytes.as_mut_ptr(),
+            required,
+            ptr::null(),
+            ptr::null_mut(),
+        )
+    };
+    if written <= 0 {
+        return;
+    }
+    if is_error {
+        let mut output = io::stderr().lock();
+        let _ = output.write_all(&bytes[..written as usize]);
+    } else {
+        let mut output = io::stdout().lock();
+        let _ = output.write_all(&bytes[..written as usize]);
+    }
+}
+
+macro_rules! cli_println {
+    ($($argument:tt)*) => {{
+        let mut line = format!($($argument)*);
+        line.push('\n');
+        write_cli_output(&line, false);
+    }};
+}
+
+macro_rules! cli_eprintln {
+    ($($argument:tt)*) => {{
+        let mut line = format!($($argument)*);
+        line.push('\n');
+        write_cli_output(&line, true);
+    }};
+}
+
 static SERVICE_STATUS_HANDLE_VALUE: AtomicIsize = AtomicIsize::new(0);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -654,13 +741,13 @@ fn get_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), S
             ExitAction::Exit => "Exit",
             ExitAction::Suicide => "Suicide",
         };
-        println!("{display}\r");
+        cli_println!("{display}\r");
         return Ok(());
     }
     if spec.kind == SettingKind::Hook {
         let hook =
             additional.ok_or_else(|| "AppEvents requires an event/action pair".to_owned())?;
-        println!("{}\r", read_hook(service, hook)?.unwrap_or_default());
+        cli_println!("{}\r", read_hook(service, hook)?.unwrap_or_default());
         return Ok(());
     }
     let (key, value_name) = setting_location(service, spec, additional, false)?;
@@ -743,7 +830,7 @@ fn get_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), S
             }
         }
     };
-    println!("{display}\r");
+    cli_println!("{display}\r");
     Ok(())
 }
 
@@ -1024,11 +1111,11 @@ fn get_native_setting(service: &str, parameter: &str, extra: &[String]) -> Resul
             } else {
                 format_cli_multi_string(&values)
             };
-            println!("{display}\r");
+            cli_println!("{display}\r");
             Ok(())
         }
         "name" => {
-            println!("{service}\r");
+            cli_println!("{service}\r");
             Ok(())
         }
         "dependongroup" | "dependonservice" | "description" | "displayname" | "imagepath"
@@ -1086,7 +1173,7 @@ fn get_native_setting(service: &str, parameter: &str, extra: &[String]) -> Resul
                 "type" => service_type_name(config.dwServiceType).into(),
                 _ => unreachable!(),
             };
-            println!("{value}\r");
+            cli_println!("{value}\r");
             Ok(())
         }
         _ => Err(format!("unsupported setting: {parameter}")),
@@ -1469,7 +1556,7 @@ fn dump_set_line_values(
         arguments.push(quote_dump_arg(additional));
     }
     arguments.extend(values.iter().map(|value| quote_dump_arg(value)));
-    println!("{}\r", arguments.join(" "));
+    cli_println!("{}\r", arguments.join(" "));
 }
 
 fn registry_names(key: HKEY, subkeys: bool) -> Result<Vec<String>, String> {
@@ -1760,7 +1847,7 @@ fn dump_service(source: &str, target: Option<&str>) -> Result<(), String> {
         quote_dump_arg(target),
         quote_dump_arg(&application),
     ];
-    println!("{}\r", install.join(" "));
+    cli_println!("{}\r", install.join(" "));
     dump_managed_settings(&executable, source, target)?;
     dump_native_settings(&executable, source, target)
 }
@@ -2178,7 +2265,7 @@ fn list_services(include_native: bool) -> Result<(), String> {
                 .flatten()
                 .is_some();
             if include_native || managed {
-                println!("{name}\r");
+                cli_println!("{name}\r");
             }
         }
         if ok != 0 {
@@ -2275,7 +2362,7 @@ fn process_tree(service: &str) -> Result<(), String> {
     let root_image = match process_image(root) {
         Ok(image) => image,
         Err(error) => {
-            eprintln!("{service}: {root}: {error}");
+            cli_eprintln!("{service}: {root}: {error}");
             return Ok(());
         }
     };
@@ -2329,7 +2416,7 @@ fn process_tree(service: &str) -> Result<(), String> {
         ) {
             return;
         }
-        println!("{pid:>8} {}{}\r", " ".repeat(depth), image.path);
+        cli_println!("{pid:>8} {}{}\r", " ".repeat(depth), image.path);
         if let Some(children) = tree.get(&pid) {
             for child in children {
                 visit(child.pid, depth + 1, None, service_lifetime, tree, seen);
@@ -2469,7 +2556,7 @@ fn install(name: &str, application: Option<&str>, args: &[String]) -> Result<(),
         }
         return Err(error);
     }
-    println!("Installed service '{name}'.\r");
+    cli_println!("Installed service '{name}'.\r");
     Ok(())
 }
 
@@ -4099,18 +4186,18 @@ fn status_code(name: &str) -> Result<u8, String> {
     let handle = match open_service(name, SERVICE_QUERY_STATUS) {
         Ok(handle) => handle,
         Err(error) => {
-            eprintln!("{name}: {error}\r");
+            cli_eprintln!("{name}: {error}\r");
             return Ok(0);
         }
     };
     let current_state = match state(handle.0) {
         Ok(current_state) => current_state,
         Err(error) => {
-            eprintln!("{name}: {error}\r");
+            cli_eprintln!("{name}: {error}\r");
             return Ok(0);
         }
     };
-    println!("{}\r", state_name(current_state));
+    cli_println!("{}\r", state_name(current_state));
     Ok(current_state.min(u8::MAX as u32) as u8)
 }
 
@@ -4155,7 +4242,7 @@ fn elevate(arguments: &[String]) -> u8 {
     let executable = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("nssm-rs: unable to locate executable for elevation: {error}");
+            cli_eprintln!("nssm-rs: unable to locate executable for elevation: {error}");
             return 100;
         }
     };
@@ -4170,7 +4257,7 @@ fn elevate(arguments: &[String]) -> u8 {
     info.lpParameters = parameters.as_ptr();
     info.nShow = SW_SHOW;
     if unsafe { ShellExecuteExW(&mut info) } == 0 {
-        eprintln!("nssm-rs: Windows refused the administrator elevation request");
+        cli_eprintln!("nssm-rs: Windows refused the administrator elevation request");
         100
     } else {
         0
@@ -4205,7 +4292,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
         | Command::Version => None,
     };
     if let Some(service) = service.filter(|service| service_is_missing(service)) {
-        eprintln!("nssm-rs: service '{service}' does not exist\r");
+        cli_eprintln!("nssm-rs: service '{service}' does not exist\r");
         return Ok(3);
     }
     let managed_parameter = match &command {
@@ -4226,7 +4313,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
     if let Some((service, parameter)) = managed_parameter
         && !is_nssm_service(service)
     {
-        eprintln!("Parameter \"{parameter}\" is only valid for services managed by NSSM!\r");
+        cli_eprintln!("Parameter \"{parameter}\" is only valid for services managed by NSSM!\r");
         return Ok(1);
     }
     match command {
@@ -4241,17 +4328,17 @@ pub fn execute(command: Command) -> Result<u8, String> {
             }
             if let Err(error) = open_service(&service, SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG)
             {
-                eprintln!("nssm-rs: {error}\r");
+                cli_eprintln!("nssm-rs: {error}\r");
                 return Ok(3);
             }
             if !is_nssm_service(&service) {
-                eprintln!("nssm-rs: AppAffinity is only valid for nssm-rs services\r");
+                cli_eprintln!("nssm-rs: AppAffinity is only valid for nssm-rs services\r");
                 return Ok(1);
             }
             match set_setting(&service, &parameter, &values) {
                 Ok(()) => Ok(0),
                 Err(error) => {
-                    eprintln!("nssm-rs: {error}\r");
+                    cli_eprintln!("nssm-rs: {error}\r");
                     Ok(6)
                 }
             }
@@ -4264,7 +4351,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
             } if known_setting(&parameter) => match get_setting(&service, &parameter, &extra) {
                 Ok(()) => Ok(0),
                 Err(error) => {
-                    eprintln!("nssm-rs: {error}\r");
+                    cli_eprintln!("nssm-rs: {error}\r");
                     Ok(5)
                 }
             },
@@ -4275,7 +4362,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
             } if known_setting(&parameter) => match set_setting(&service, &parameter, &values) {
                 Ok(()) => Ok(0),
                 Err(error) => {
-                    eprintln!("nssm-rs: {error}\r");
+                    cli_eprintln!("nssm-rs: {error}\r");
                     Ok(6)
                 }
             },
@@ -4291,7 +4378,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
             } if known_setting(&parameter) => match reset_setting(&service, &parameter, &extra) {
                 Ok(()) => Ok(0),
                 Err(error) => {
-                    eprintln!("nssm-rs: {error}\r");
+                    cli_eprintln!("nssm-rs: {error}\r");
                     Ok(6)
                 }
             },
@@ -4319,7 +4406,7 @@ fn execute_service_command(command: Command) -> Result<(), String> {
         }
         Command::Status(name) => {
             let s = state(open_service(&name, SERVICE_QUERY_STATUS)?.0)?;
-            println!("{}\r", state_name(s));
+            cli_println!("{}\r", state_name(s));
             Ok(())
         }
         Command::StatusCode(name) => status_code(&name).map(|_| ()),

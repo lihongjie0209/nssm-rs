@@ -62,6 +62,47 @@ fn cli(args: &[&str]) -> Output {
         .expect("nssm-rs executable starts")
 }
 
+fn windows_c_locale_bytes(value: &str) -> Vec<u8> {
+    use windows_sys::Win32::Globalization::WideCharToMultiByte;
+
+    let wide: Vec<u16> = value.encode_utf16().collect();
+    let required = unsafe {
+        WideCharToMultiByte(
+            1252,
+            0x0000_0400,
+            wide.as_ptr(),
+            wide.len() as i32,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert!(required >= 0);
+    let mut bytes = vec![0; required as usize];
+    let written = unsafe {
+        WideCharToMultiByte(
+            1252,
+            0x0000_0400,
+            wide.as_ptr(),
+            wide.len() as i32,
+            bytes.as_mut_ptr(),
+            required,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(written, required);
+    bytes
+}
+
+fn cli_stdout_value(output: &Output) -> &[u8] {
+    output
+        .stdout
+        .strip_suffix(b"\r\n")
+        .unwrap_or(&output.stdout)
+}
+
 fn cli_with_input(args: &[&str], input: &str) -> Output {
     let binary = std::env::var_os("NSSM_RS_TEST_BINARY")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-rs").into());
@@ -752,9 +793,9 @@ fn string_settings_round_trip_unicode_spaces_and_reset_values() {
             String::from_utf8_lossy(&queried.stderr)
         );
         assert_eq!(
-            String::from_utf8_lossy(&queried.stdout).trim(),
-            value,
-            "{setting} did not preserve its string value"
+            cli_stdout_value(&queried),
+            windows_c_locale_bytes(&value),
+            "{setting} did not preserve its string value in CLI output"
         );
 
         let reset = cli(&["reset", &service, setting]);
@@ -770,8 +811,8 @@ fn string_settings_round_trip_unicode_spaces_and_reset_values() {
             String::from_utf8_lossy(&queried.stderr)
         );
         assert_eq!(
-            String::from_utf8_lossy(&queried.stdout).trim(),
-            expected_default,
+            cli_stdout_value(&queried),
+            windows_c_locale_bytes(expected_default),
             "reset {setting} did not restore its default"
         );
         if setting == "Application" {
