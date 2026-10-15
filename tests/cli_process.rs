@@ -19,6 +19,30 @@ fn help_and_version_are_successful_commands_with_output() {
 }
 
 #[test]
+fn version_aliases_report_the_same_result_as_the_canonical_command() {
+    let canonical = run(&["version"]);
+    assert_eq!(canonical.status.code(), Some(0));
+    assert!(!canonical.stdout.is_empty());
+    assert!(canonical.stderr.is_empty());
+
+    for spelling in [
+        "/version",
+        "/VERSION",
+        "-v",
+        "-V",
+        "-version",
+        "-VERSION",
+        "--version",
+        "--VERSION",
+    ] {
+        let result = run(&[spelling]);
+        assert_eq!(result.status.code(), Some(0), "{spelling}");
+        assert_eq!(result.stdout, canonical.stdout, "{spelling}");
+        assert_eq!(result.stderr, canonical.stderr, "{spelling}");
+    }
+}
+
+#[test]
 fn no_arguments_print_usage_to_stderr_and_return_usage_exit_status() {
     let result = run(&[]);
     assert_eq!(result.status.code(), Some(1));
