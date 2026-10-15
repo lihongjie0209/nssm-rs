@@ -3281,7 +3281,7 @@ unsafe extern "system" fn service_handler(
                 &child_environment,
                 app_pid,
                 None,
-                true,
+                false,
                 false,
             );
         }

@@ -152,10 +152,11 @@ checking stdin, stdout and stderr contents. The Windows suite also verifies that
 CTRL+C, WM_CLOSE and WM_QUIT before termination fallback; hook tests capture all
 documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
 Rotate/Pre/Post and verify the configured working directory. Supported Power
-events map to Change/Resume hooks and execute synchronously in the SCM callback,
-matching NSSM's dispatch model. Windows unit tests cover event mapping and hook
-names; injecting real OS power broadcasts into a running service and comparing
-the full Power hook ABI context remain unverified. A service launch
+events map to Change/Resume hooks and are dispatched from the SCM callback;
+NSSM launches these hook processes asynchronously, and nssm-rs now does the
+same. Windows unit tests cover event mapping and hook names; injecting real OS
+power broadcasts into a running service and comparing the full Power hook ABI
+context remain unverified. A service launch
 integration test also copies the child fixture under a Unicode executable path,
 passes Unicode arguments containing spaces, quotes, trailing backslashes, and an
 empty argument, then checks the child's exact received argument list. Another
