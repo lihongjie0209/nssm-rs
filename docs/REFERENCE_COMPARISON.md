@@ -14,6 +14,14 @@ It is a partial report, not the command-by-command release acceptance report.
 - Output comparisons normalize trailing whitespace and, for service lists,
   sort service names before comparing.
 
+The repeatable Windows reference sweep is available as the manually triggered
+`Reference compatibility` GitHub Actions workflow. It downloads the pinned
+archive, checks the SHA-256 above, builds nssm-rs, and runs only the recognized
+read-only cases in `tests/reference_readonly_sweep.ps1`. It deliberately avoids
+no-argument NSSM invocation (which may display its GUI dialog) and commands that
+can request UAC elevation. The sweep runs separately from CI so the ordinary
+build and service integration jobs remain network-independent.
+
 ## Checks completed
 
 | Scenario | Result |

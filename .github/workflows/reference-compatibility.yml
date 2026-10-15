@@ -1,0 +1,40 @@
+name: Reference compatibility
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-reference-sweep:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build nssm-rs
+        run: cargo build --locked --bin nssm-rs
+
+      - name: Download and verify pinned NSSM reference
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'nssm_x64.zip'
+          $destination = Join-Path $env:RUNNER_TEMP 'nssm-reference'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/ONLYOFFICE/nssm/releases/download/v2.24.1/nssm_x64.zip' `
+            -OutFile $archive
+          $actualHash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          $expectedHash = 'dd15b0bd3541f954220b8c0622a40294b919dfd0e6635859e733f153ba34bceb'
+          if ($actualHash -ne $expectedHash) {
+            throw "Pinned NSSM archive hash mismatch: $actualHash"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
+          "NSSM_REFERENCE_BINARY=$destination/nssm.exe" >> $env:GITHUB_ENV
+
+      - name: Compare safe read-only CLI commands
+        shell: pwsh
+        run: >-
+          pwsh -NoProfile -NonInteractive -File tests/reference_readonly_sweep.ps1
+          -ReferenceBinary "$env:NSSM_REFERENCE_BINARY"
+          -CandidateBinary "target/debug/nssm-rs.exe"
