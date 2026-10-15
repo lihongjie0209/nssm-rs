@@ -2010,16 +2010,14 @@ fn runs_configured_start_and_exit_hooks() {
     {
         let hook = if event_action == "Start/Post" {
             format!("cmd.exe /c set NSSM_COMMAND_LINE>{path}")
+        } else if event_action == "Start/Pre" {
+            format!(
+                "cmd.exe /c echo {marker}>{path} & cd > {cwd_marker} & set NSSM_ > {abi_marker}"
+            )
+        } else if event_action == "Exit/Post" {
+            format!("cmd.exe /c echo {marker}>{path} & set NSSM_ > {exit_abi_marker}")
         } else {
-            if event_action == "Start/Pre" {
-                format!(
-                    "cmd.exe /c echo {marker}>{path} & cd > {cwd_marker} & set NSSM_ > {abi_marker}"
-                )
-            } else if event_action == "Exit/Post" {
-                format!("cmd.exe /c echo {marker}>{path} & set NSSM_ > {exit_abi_marker}")
-            } else {
-                format!("cmd.exe /c echo {marker}>{path}")
-            }
+            format!("cmd.exe /c echo {marker}>{path}")
         };
         let configured = cli(&["set", &service, "AppEvents", event_action, &hook]);
         assert!(

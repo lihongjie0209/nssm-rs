@@ -594,7 +594,7 @@ fn decode_wide(data: &[u8]) -> Result<String, String> {
         return Err("registry string has an odd byte length".into());
     }
     let chars: Vec<u16> = data
-        .chunks_exact(2)
+        .chunks(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .take_while(|c| *c != 0)
         .collect();
@@ -606,7 +606,7 @@ fn decode_multi_string(data: &[u8]) -> Result<Vec<String>, String> {
         return Err("registry multi-string has an odd byte length".into());
     }
     let chars: Vec<u16> = data
-        .chunks_exact(2)
+        .chunks(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     let mut result = Vec::new();
