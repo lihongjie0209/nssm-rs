@@ -501,7 +501,9 @@ fn passes_replacement_and_expanded_extra_environment_to_child() {
     );
     let mut completed = false;
     for _ in 0..100 {
-        completed = cli(&["status", &service]).status.success()
+        let status = cli(&["status", &service]);
+        completed = status.status.success()
+            && String::from_utf8_lossy(&status.stdout).trim() == "SERVICE_STOPPED"
             && std::fs::read_to_string(&stdout_path)
                 .is_ok_and(|contents| contents.trim() == "base:base-extra");
         if completed {
