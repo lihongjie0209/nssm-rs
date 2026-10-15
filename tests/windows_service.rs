@@ -681,7 +681,7 @@ fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
 }
 
 #[test]
-fn continue_interrupts_restart_throttle_and_pause_is_rejected() {
+fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
     let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
