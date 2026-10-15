@@ -2522,6 +2522,70 @@ fn invalid_stop_method_skip_type_logs_event_and_keeps_all_stop_methods() {
 }
 
 #[test]
+fn invalid_stop_grace_period_type_uses_default_and_logs_event() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let marker = std::env::temp_dir().join(format!("{service}_signal.txt"));
+    let marker = marker.to_string_lossy().into_owned();
+    let started_marker = format!("{marker}.started");
+    let _files = FileCleanup(vec![marker.clone(), started_marker.clone()]);
+    let fixture = std::env::var_os("NSSM_RS_TEST_FIXTURE")
+        .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
+        .expect("Cargo builds the console signal fixture")
+        .to_string_lossy()
+        .into_owned();
+    assert!(cli(&["install", &service, &fixture]).status.success());
+    for (key, value) in [
+        ("NSSM_SIGNAL_MARKER", marker.as_str()),
+        ("NSSM_STARTED_MARKER", started_marker.as_str()),
+    ] {
+        assert!(
+            cli(&["set", &service, "Environment", &format!("+{key}={value}")])
+                .status
+                .success()
+        );
+    }
+
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
+    let write_invalid_type = format!(
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppStopMethodConsole -PropertyType String -Value 'invalid-delay' -Force"
+    );
+    assert!(
+        Command::new(&powershell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &write_invalid_type
+            ])
+            .status()
+            .is_ok_and(|status| status.success()),
+        "test writes a wrong-type stop grace period"
+    );
+
+    assert!(cli(&["start", &service]).status.success());
+    assert!(wait_for_service_state(&service, "SERVICE_RUNNING"));
+    let start_deadline = Instant::now() + Duration::from_secs(5);
+    while !std::path::Path::new(&started_marker).exists() && Instant::now() < start_deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(std::path::Path::new(&started_marker).exists());
+    assert!(cli(&["stop", &service]).status.success());
+    assert!(std::path::Path::new(&marker).exists());
+
+    let escaped_service = service.replace('\'', "''");
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1056}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 'AppStopMethodConsole' -and $event.Properties[2].Value -eq '1500') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "invalid grace period uses the 1500 ms default and logs event 1056"
+    );
+}
+
+#[test]
 fn timestamp_log_prefixes_each_child_output_line_in_utc() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
