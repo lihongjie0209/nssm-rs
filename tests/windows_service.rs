@@ -766,7 +766,7 @@ fn runs_configured_start_and_exit_hooks() {
             .success()
     );
     for ((event_action, marker), path) in [
-        ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_CONFIGURATION% %NSSM_START_REQUESTED_COUNT% %NSSM_START_COUNT% %NSSM_EXIT_COUNT% %NSSM_THROTTLE_COUNT% %NSSM_RUNTIME% %NSSM_LAST_CONTROL% %NSSM_SERVICE_DISPLAYNAME%"),
+        ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_CONFIGURATION% %NSSM_START_REQUESTED_COUNT% %NSSM_START_COUNT% %NSSM_EXIT_COUNT% %NSSM_THROTTLE_COUNT% %NSSM_RUNTIME% %NSSM_LAST_CONTROL% %NSSM_SERVICE_DISPLAYNAME% %NSSM_BUILD_DATE%"),
         ("Start/Post", ""),
         ("Exit/Post", "exit-post %NSSM_EXIT_COUNT% %NSSM_START_COUNT% %NSSM_APPLICATION_RUNTIME%"),
     ]
@@ -832,6 +832,7 @@ fn runs_configured_start_and_exit_hooks() {
     assert_eq!(fields.next(), Some("Hook"));
     assert_eq!(fields.next(), Some("ABITest"));
     assert_eq!(fields.next(), Some("Service"));
+    assert_eq!(fields.next(), Some(env!("NSSM_BUILD_DATE")));
     let start_post = std::fs::read_to_string(&event_paths[1]).unwrap();
     assert!(start_post.starts_with("NSSM_COMMAND_LINE=\""));
     assert!(start_post.contains("cmd.exe\""));

@@ -10,6 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(test)]
+#[path = "build_date.rs"]
+mod build_date;
+
 /// Returns whether SCM requires a password for this service account.
 /// Local identities, virtual service accounts, and managed service accounts
 /// are passwordless.

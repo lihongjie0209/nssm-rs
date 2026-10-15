@@ -26,8 +26,7 @@ use windows_sys::Win32::{
         WPARAM,
     },
     System::Console::{
-        AttachConsole, CTRL_BREAK_EVENT, FreeConsole, GenerateConsoleCtrlEvent,
-        SetConsoleCtrlHandler,
+        AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
     },
     System::{Diagnostics::ToolHelp::*, JobObjects::*, Registry::*, Services::*, Threading::*},
     UI::WindowsAndMessaging::{
@@ -2315,13 +2314,13 @@ unsafe extern "system" fn post_close_to_process_window(hwnd: HWND, target_pid: L
     1
 }
 
-fn send_console_break(process_id: u32) {
+fn send_console_ctrl_c(process_id: u32) {
     if unsafe { AttachConsole(process_id) } == 0 {
         return;
     }
     unsafe {
         SetConsoleCtrlHandler(None, 1);
-        GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
+        GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
         FreeConsole();
         SetConsoleCtrlHandler(None, 0);
     }
@@ -2371,7 +2370,7 @@ fn stop_child(service: &str, child: &mut ManagedChild, no_console: bool) -> Resu
         match method {
             StopMethod::Console | StopMethod::Window | StopMethod::Threads => {
                 let (setting, signal) = match method {
-                    StopMethod::Console => ("AppStopMethodConsole", send_console_break as fn(u32)),
+                    StopMethod::Console => ("AppStopMethodConsole", send_console_ctrl_c as fn(u32)),
                     StopMethod::Window => ("AppStopMethodWindow", send_window_close as fn(u32)),
                     StopMethod::Threads => ("AppStopMethodThreads", send_thread_quit as fn(u32)),
                     StopMethod::Terminate => unreachable!(),
@@ -2649,10 +2648,7 @@ fn invoke_hook(
         .env("NSSM_ACTION", action)
         .env("NSSM_TRIGGER", trigger)
         .env("NSSM_CONFIGURATION", configuration)
-        .env(
-            "NSSM_BUILD_DATE",
-            option_env!("NSSM_BUILD_DATE").unwrap_or(""),
-        )
+        .env("NSSM_BUILD_DATE", env!("NSSM_BUILD_DATE"))
         .env("NSSM_SERVICE_NAME", service)
         .env("NSSM_SERVICE_DISPLAYNAME", display_name)
         .env("NSSM_EXE", image)
@@ -3048,7 +3044,9 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         if no_console {
             command.creation_flags(CREATE_NO_WINDOW);
         } else {
-            let mut flags = CREATE_NEW_PROCESS_GROUP;
+            // Keep the child in the console's default process group so a
+            // CTRL_C_EVENT sent with group id 0 reaches its handler.
+            let mut flags = 0;
             if read_reg_dword(&service_name, "AppStopMethodSkip", 0).unwrap_or(0)
                 & STOP_SKIP_CONSOLE
                 == 0
