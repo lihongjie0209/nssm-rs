@@ -85,7 +85,7 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
     );
     assert_eq!(
         installed.stdout,
-        format!("Service \"{service}\" installed successfully!\r\n").as_bytes()
+        format!("Service \"{service}\" installed successfully!\r\r\n").as_bytes()
     );
     assert!(installed.stderr.is_empty());
     let application = cli(&["get", &service, "Application"]);
@@ -151,7 +151,7 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
     );
     assert_eq!(
         removed.stdout,
-        format!("Service \"{service}\" removed successfully!\r\n").as_bytes()
+        format!("Service \"{service}\" removed successfully!\r\r\n").as_bytes()
     );
     let mut disappeared = false;
     for _ in 0..100 {
