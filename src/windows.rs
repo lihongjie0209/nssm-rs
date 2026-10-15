@@ -30,7 +30,8 @@ use windows_sys::Win32::{
     },
     System::{Diagnostics::ToolHelp::*, JobObjects::*, Registry::*, Services::*, Threading::*},
     UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, PostMessageW, PostThreadMessageW, WM_CLOSE, WM_QUIT,
+        EnumWindows, GetWindowThreadProcessId, PostThreadMessageW, SMTO_ABORTIFHUNG,
+        SendMessageTimeoutW, WM_CLOSE, WM_QUIT,
     },
 };
 
@@ -2309,7 +2310,10 @@ unsafe extern "system" fn post_close_to_process_window(hwnd: HWND, target_pid: L
     let mut process_id = 0;
     unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) };
     if process_id == target_pid as u32 {
-        unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+        let mut result = 0;
+        unsafe {
+            SendMessageTimeoutW(hwnd, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 1000, &mut result);
+        }
     }
     1
 }

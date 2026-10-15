@@ -363,6 +363,20 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
 
 #[test]
 fn sends_ctrl_c_to_child_in_its_console_before_termination_fallback() {
+    verify_service_shutdown_signal(&[], "6", "ctrl-c");
+}
+
+#[test]
+fn sends_thread_quit_to_child_before_termination_fallback() {
+    verify_service_shutdown_signal(&["thread"], "3", "thread-quit");
+}
+
+#[test]
+fn sends_window_close_to_child_before_termination_fallback() {
+    verify_service_shutdown_signal(&["window"], "5", "window-close");
+}
+
+fn verify_service_shutdown_signal(arguments: &[&str], skip: &str, expected: &str) {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
     let marker = std::env::temp_dir().join(format!("{service}_signal.txt"));
@@ -373,7 +387,9 @@ fn sends_ctrl_c_to_child_in_its_console_before_termination_fallback() {
         .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
         .expect("Cargo builds the console signal fixture");
     let fixture = fixture.to_string_lossy().into_owned();
-    let installed = cli(&["install", &service, &fixture]);
+    let mut install_args = vec!["install", &service, &fixture];
+    install_args.extend_from_slice(arguments);
+    let installed = cli(&install_args);
     assert!(
         installed.status.success(),
         "{}",
@@ -390,7 +406,7 @@ fn sends_ctrl_c_to_child_in_its_console_before_termination_fallback() {
             String::from_utf8_lossy(&set_env.stderr)
         );
     }
-    let set_skip = cli(&["set", &service, "AppStopMethodSkip", "6"]);
+    let set_skip = cli(&["set", &service, "AppStopMethodSkip", skip]);
     assert!(
         set_skip.status.success(),
         "{}",
@@ -419,7 +435,7 @@ fn sends_ctrl_c_to_child_in_its_console_before_termination_fallback() {
     );
     assert_eq!(
         std::fs::read_to_string(&marker).expect("signal marker exists"),
-        "ctrl-c"
+        expected
     );
 }
 
