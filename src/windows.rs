@@ -50,6 +50,11 @@ const EVENT_DISPATCHER_FAILED: u32 = 0xc000_03e9;
 const EVENT_START_SERVICE_FAILED: u32 = 0xc000_03ee;
 const EVENT_STARTED_SERVICE: u32 = 0x4000_03f0;
 const EVENT_CREATEPROCESS_FAILED: u32 = 0xc000_03f2;
+const EVENT_ENDED_SERVICE: u32 = 0x4000_03f5;
+const EVENT_EXIT_RESTART: u32 = 0x4000_03f6;
+const EVENT_EXIT_IGNORE: u32 = 0x4000_03f7;
+const EVENT_EXIT: u32 = 0x4000_03f8;
+const EVENT_EXIT_UNCLEAN: u32 = 0x4000_03fc;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
@@ -3500,6 +3505,13 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         {
             child_exit_code = 2;
         }
+        if !STOP_REQUESTED.load(Ordering::SeqCst) {
+            report_event(
+                windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                EVENT_ENDED_SERVICE,
+                &[&app, &service_name, &child_exit_code.to_string()],
+            );
+        }
         let app_start_ms = HOOK_APPLICATION_START_MS.load(Ordering::SeqCst);
         if app_start_ms != 0 {
             HOOK_APPLICATION_RUNTIME_MS.store(
@@ -3529,24 +3541,46 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             }
         };
         let action = normalize_exit_action(child_exit_code, action, inherited_default);
+        let exit_code = child_exit_code.to_string();
         match action {
             ExitAction::Ignore => {
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                    EVENT_EXIT_IGNORE,
+                    &[&service_name, &exit_code, "Ignore", &app],
+                );
                 while !STOP_REQUESTED.load(Ordering::SeqCst) {
                     thread::sleep(Duration::from_millis(250));
                 }
                 break;
             }
             ExitAction::Exit => {
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                    EVENT_EXIT,
+                    &[&service_name, &exit_code, "Exit"],
+                );
                 finish_async_hooks();
                 set_status(SERVICE_STOPPED, child_exit_code, 0);
                 return;
             }
             ExitAction::Suicide => {
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                    EVENT_EXIT_UNCLEAN,
+                    &[&service_name, &exit_code, "Suicide"],
+                );
                 finish_async_hooks();
                 set_status(SERVICE_STOPPED, child_exit_code.max(1), 0);
                 return;
             }
-            ExitAction::Restart => {}
+            ExitAction::Restart => {
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                    EVENT_EXIT_RESTART,
+                    &[&service_name, &exit_code, "Restart", &app],
+                );
+            }
         }
         let delay = throttle.after_exit();
         HOOK_THROTTLE_COUNT.store(throttle.counter(), Ordering::SeqCst);

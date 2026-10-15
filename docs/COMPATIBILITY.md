@@ -39,7 +39,7 @@ interface and Windows service behavior. GUI workflows are explicitly excluded.
 | Hooks | `AppEvents <event>/<action> <command>` for service/app start, stop, rotate lifecycle and pre/post phases; hook output-handle behavior and all `NSSM_*` ABI variables | Event-order integration assertions for normal start, restart, stop, rotation, failures, and cancellation; assert the full environment ABI on real Start, Exit, Stop and Rotate hooks |
 | Discovery/reporting | `list` and `list all`; `processes <name>`; `dump <name>` and `dump <name> <newname>` | Golden output tests, quoting/escaping round-trip, process tree correctness, native-service filtering |
 | Windows process launch | Correct Windows quoting, Unicode paths/args, environment expansion, priority, CPU affinity, console/window behavior | Launch fixture with argv/environment echo, Unicode and special-character cases, priority/affinity inspection |
-| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; currently events 1001 (dispatcher failure), 1006 (service start failure), 1008 (child started), and 1010 (child launch failure) are verified |
+| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; currently events 1001 (dispatcher failure), 1006 (service start failure), 1008 (child started), 1010 (child launch failure), 1013 (child exited), and 1016 (Exit action) are verified |
 
 ### Complete setting-name inventory
 
@@ -124,7 +124,7 @@ CTRL+C, WM_CLOSE and WM_QUIT before termination fallback; hook tests capture all
 documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
 Rotate/Pre/Post and verify the configured working directory. Remaining
 acceptance scope includes hook ABI context parity for Power events, event-log compatibility
-beyond events 1001, 1006, 1008, and 1010, broader error-path coverage, and
-command-by-command parity against the pinned reference.
+beyond events 1001, 1006, 1008, 1010, 1013, and 1016, broader error-path
+coverage, and command-by-command parity against the pinned reference.
 Do not call this a complete NSSM replacement or publish a stable release until
 each acceptance row has evidence.

@@ -572,6 +572,49 @@ fn logs_successful_child_process_starts_to_the_application_event_log() {
     assert!(cli(&["stop", &service]).status.success());
 }
 
+#[test]
+fn logs_application_exit_code_and_exit_action_to_the_event_log() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let installed = cli(&["install", &service, &command_prompt, "/c", "exit 7"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let policy = cli(&["set", &service, "AppExit", "Default", "Exit"]);
+    assert!(
+        policy.status.success(),
+        "exit policy set failed: {}",
+        String::from_utf8_lossy(&policy.stderr)
+    );
+    let _ = cli(&["start", &service]);
+
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1013,1016)}} -MaxEvents 60 -ErrorAction SilentlyContinue; $ended = $false; $policy = $false; foreach ($event in $events) {{ if ($event.Id -eq 1013 -and $event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{command_prompt}' -and $event.Properties[1].Value -eq '{service}' -and $event.Properties[2].Value -eq 7 -and $event.Message.Contains('exited with return code 7')) {{ $ended = $true }}; if ($event.Id -eq 1016 -and $event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq 7 -and $event.Properties[2].Value -eq 'Exit' -and $event.Message.Contains('Exiting')) {{ $policy = $true }} }}; if ($ended -and $policy) {{ exit 0 }}; exit 1"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut events_found = false;
+    while Instant::now() < deadline {
+        events_found = Command::new(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .is_ok_and(|status| status.success());
+        if events_found {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        events_found,
+        "Application log contains events 1013 and 1016 with the child exit code and configured action"
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+}
+
 fn verify_service_shutdown_signal(arguments: &[&str], skip: &str, expected: &str) {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
