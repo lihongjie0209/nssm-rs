@@ -96,7 +96,7 @@ function Assert-SettingValue($Result, [string] $Expected, [string] $Label) {
 
 function Compare-StringSetting([System.Collections.Generic.List[object]] $Results,
     [string] $Binary, [string] $Service, [string] $Name, [string] $Value,
-    [string] $Default, [string] $Subparameter = '') {
+    [string] $Default, [string] $Subparameter = '', [switch] $SkipReset) {
     $setArguments = @('set', $Service, $Name)
     $getArguments = @('get', $Service, $Name)
     $resetArguments = @('reset', $Service, $Name)
@@ -110,6 +110,10 @@ function Compare-StringSetting([System.Collections.Generic.List[object]] $Result
     $configured = Add-Result $Results $Binary "get $Name" $getArguments
     if ($null -ne $Default) {
         Assert-SettingValue $configured $Value "get $Name"
+    }
+    if ($SkipReset) {
+        Write-Host "Skipped reference reset $Name because pinned NSSM v2.24.1 crashes on this operation."
+        return
     }
     Add-Result $Results $Binary "reset $Name" $resetArguments | Out-Null
     $reset = Add-Result $Results $Binary "get reset $Name" $getArguments
@@ -180,7 +184,12 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
         @{ Name = 'AppStderr'; Value = (Join-Path $temporary "$Service stderr.txt"); Default = '' },
         @{ Name = 'AppAffinity'; Value = '0'; Default = 'All' }
     )) {
-        Compare-StringSetting $results $Binary $Service $setting.Name $setting.Value $setting.Default
+        if ($setting.Name -in @('AppParameters', 'AppDirectory')) {
+            Compare-StringSetting $results $Binary $Service $setting.Name $setting.Value `
+                $setting.Default -SkipReset
+        } else {
+            Compare-StringSetting $results $Binary $Service $setting.Name $setting.Value $setting.Default
+        }
     }
     Compare-StringSetting $results $Binary $Service 'AppExit' 'Ignore' 'Restart' '23'
     Compare-StringSetting $results $Binary $Service 'AppEvents' 'cmd.exe /c exit 0' $null 'Start/Pre'
