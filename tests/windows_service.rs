@@ -590,17 +590,24 @@ fn rotate_command_copies_the_active_log_and_keeps_appending() {
         "rotate failed: {}",
         String::from_utf8_lossy(&rotated.stderr)
     );
-    let backup = std::env::temp_dir()
-        .read_dir()
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name().is_some_and(|name| {
-                name.to_string_lossy()
-                    .starts_with(&format!("{service}_rotation-"))
-            })
-        });
+    let mut backup = None;
+    for _ in 0..100 {
+        backup = std::env::temp_dir()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with(&format!("{service}_rotation-"))
+                })
+            });
+        if backup.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
     let backup = backup.expect("rotate control created a timestamped backup");
     let previous = std::fs::read(&backup).expect("rotated log is readable");
     assert!(
