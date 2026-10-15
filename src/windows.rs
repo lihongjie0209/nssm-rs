@@ -1003,6 +1003,15 @@ fn canonical_setting_name(parameter: &str) -> &str {
         .unwrap_or(parameter)
 }
 
+fn print_set_setting_error(service: &str, parameter: &str) {
+    let service_name = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());
+    cli_eprintln!(
+        "Error setting parameter \"{}\" for service \"{}\"!\r\r",
+        canonical_setting_name(parameter),
+        service_name
+    );
+}
+
 fn set_is_reset_to_default(parameter: &str, values: &[String]) -> bool {
     let Some(setting) = nssm_rs::managed_setting(parameter) else {
         return match parameter.to_ascii_lowercase().as_str() {
@@ -6232,8 +6241,8 @@ pub fn execute(command: Command) -> Result<u8, String> {
             }
             match set_setting(&service, &parameter, &values) {
                 Ok(()) => Ok(0),
-                Err(error) => {
-                    cli_eprintln!("nssm-rs: {error}\r");
+                Err(_) => {
+                    print_set_setting_error(&service, &parameter);
                     Ok(6)
                 }
             }
@@ -6276,8 +6285,8 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 values,
             } if known_setting(&parameter) => match set_setting(&service, &parameter, &values) {
                 Ok(()) => Ok(0),
-                Err(error) => {
-                    cli_eprintln!("nssm-rs: {error}\r");
+                Err(_) => {
+                    print_set_setting_error(&service, &parameter);
                     Ok(6)
                 }
             },
