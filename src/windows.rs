@@ -106,6 +106,7 @@ const EVENT_SET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0xc000_042e;
 const EVENT_BOGUS_STOP_METHOD_SKIP: u32 = 0x8000_041c;
 const EVENT_PRESTART_HOOK_ABORT: u32 = 0xc000_0437;
 const EVENT_PROCESS_STILL_ACTIVE: u32 = 0x8000_041d;
+const EVENT_SERVICE_CONFIG_FAILURE_ACTIONS_FAILED: u32 = 0xc000_0413;
 const EVENT_QUERYVALUE_FAILED: u32 = 0xc000_03fa;
 const PRIORITY_CLASS_MASK: u32 = 0x0000_c1e0;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
@@ -2313,6 +2314,30 @@ fn open_service(name: &str, access: u32) -> Result<ScHandle, String> {
     }
 }
 
+fn enable_recovery_for_non_crash_failures(service: SC_HANDLE, name: &str) {
+    let flag = SERVICE_FAILURE_ACTIONS_FLAG {
+        fFailureActionsOnNonCrashFailures: 1,
+    };
+    if unsafe {
+        ChangeServiceConfig2W(
+            service,
+            SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+            (&flag as *const SERVICE_FAILURE_ACTIONS_FLAG).cast(),
+        )
+    } == 0
+    {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(124) {
+            let message = windows_error_message(&error);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_SERVICE_CONFIG_FAILURE_ACTIONS_FAILED,
+                &[name, &message],
+            );
+        }
+    }
+}
+
 fn canonical_service_name(name: &str) -> Result<String, io::Error> {
     let manager = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
     if manager.is_null() {
@@ -3095,7 +3120,11 @@ fn install(name: &str, application: Option<&str>, args: &[String]) -> Result<(),
             manager.0,
             service_name.as_ptr(),
             service_name.as_ptr(),
-            SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP | DELETE_ACCESS,
+            SERVICE_QUERY_STATUS
+                | SERVICE_START
+                | SERVICE_STOP
+                | SERVICE_CHANGE_CONFIG
+                | DELETE_ACCESS,
             SERVICE_WIN32_OWN_PROCESS,
             SERVICE_AUTO_START,
             SERVICE_ERROR_NORMAL,
@@ -3117,6 +3146,7 @@ fn install(name: &str, application: Option<&str>, args: &[String]) -> Result<(),
         }
         return Err(error);
     }
+    enable_recovery_for_non_crash_failures(service.0, name);
     cli_println!("Installed service '{name}'.\r");
     Ok(())
 }
@@ -4506,6 +4536,11 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     }
     SERVICE_STATUS_HANDLE_VALUE.store(handle as isize, Ordering::SeqCst);
     report_service_control(&service_name, 0, true);
+    if is_administrator()
+        && let Ok(service) = open_service(&service_name, SERVICE_CHANGE_CONFIG)
+    {
+        enable_recovery_for_non_crash_failures(service.0, &service_name);
+    }
     set_status(SERVICE_START_PENDING, 0, 10_000);
     let _ = ensure_default_exit_action(&service_name);
     let config = (|| -> Result<ServiceConfig, String> {

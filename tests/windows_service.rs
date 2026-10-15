@@ -137,6 +137,53 @@ fn cli_with_input(args: &[&str], input: &str) -> Output {
     child.wait_with_output().expect("nssm-rs exits")
 }
 
+fn recovery_flag_includes_non_crash_failures(service: &str) -> bool {
+    use windows_sys::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfig2W, SC_MANAGER_CONNECT,
+        SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, SERVICE_FAILURE_ACTIONS_FLAG, SERVICE_QUERY_CONFIG,
+    };
+
+    let manager = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        return false;
+    }
+    let name: Vec<u16> = service.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe { OpenServiceW(manager, name.as_ptr(), SERVICE_QUERY_CONFIG) };
+    if handle.is_null() {
+        unsafe { CloseServiceHandle(manager) };
+        return false;
+    }
+    let mut needed = 0;
+    unsafe {
+        QueryServiceConfig2W(
+            handle,
+            SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        );
+    }
+    let mut storage = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+    let enabled = !storage.is_empty()
+        && unsafe {
+            QueryServiceConfig2W(
+                handle,
+                SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+                storage.as_mut_ptr().cast(),
+                (storage.len() * std::mem::size_of::<usize>()) as u32,
+                &mut needed,
+            )
+        } != 0
+        && unsafe { *(storage.as_ptr().cast::<SERVICE_FAILURE_ACTIONS_FLAG>()) }
+            .fFailureActionsOnNonCrashFailures
+            != 0;
+    unsafe {
+        CloseServiceHandle(handle);
+        CloseServiceHandle(manager);
+    }
+    enabled
+}
+
 fn wait_for_service_state(service: &str, expected: &str) -> bool {
     for _ in 0..100 {
         let status = cli(&["status", service]);
@@ -295,6 +342,10 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         installed.status.success(),
         "install failed: {}",
         String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        recovery_flag_includes_non_crash_failures(&service),
+        "install enables SCM recovery actions for non-crash service failures"
     );
 
     let exit_policy_before_start = cli(&["get", &service, "AppExit", "Default"]);
