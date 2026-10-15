@@ -201,14 +201,15 @@ The service-main unit test invokes `RegisterServiceCtrlHandlerExW` outside an
 SCM dispatcher, producing the real Windows registration failure and verifying
 event 1005 in the Application log. The read-only Windows reference sweep checks
 all 39 managed setting names against a native service and compares exact
-stdout/stderr bytes and exit status. The latest complete sweep matched 92 safe
-invocations; together with four separately compared missing-service cases,
-recorded evidence covers 96 comparisons. The sweep also verifies all nine NSSM
-version switch forms by success status and output stream contract. It caught and
-resolved the extra carriage return NSSM emits for managed-setting rejection,
-the missing-subparameter
-precedence for `AppExit` and `AppEvents`, and the process-open error's system
-message and trailing blank line; Windows process/unit tests cover these cases.
+stdout/stderr bytes and exit status. The latest complete sweep matched all 100
+safe invocations against pinned NSSM v2.24.1 in [GitHub Actions run
+38787362624](https://github.com/lihongjie0209/nssm-rs/actions/runs/38787362624).
+It verifies all nine NSSM version switch forms by success status and output
+stream contract, plus missing-subparameter precedence for `AppExit` and
+`AppEvents` across `get`, `reset`, `unset`, and safe `set` forms. The sweep
+caught and resolved the extra carriage return NSSM emits for managed-setting
+rejection and the process-open error's system message and trailing blank line;
+Windows process/unit tests cover these cases.
 
 The service host now distinguishes an initial child launch failure from a
 failed launch after an application Restart action. The latter reports warning
