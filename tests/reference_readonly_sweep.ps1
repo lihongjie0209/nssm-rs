@@ -45,6 +45,9 @@ $cases = @(
     @{ Name = 'get Task Scheduler Name by display name'; Args = @('get', 'Task Scheduler', 'Name') },
     @{ Name = 'get Spooler DependOnService'; Args = @('get', 'Spooler', 'DependOnService') },
     @{ Name = 'get missing service'; Args = @('get', 'NssmRDefinitelyMissingService', 'Start') },
+    @{ Name = 'set on missing service'; Args = @('set', 'NssmRDefinitelyMissingService', 'Start', '3') },
+    @{ Name = 'reset on missing service'; Args = @('reset', 'NssmRDefinitelyMissingService', 'Start') },
+    @{ Name = 'unset on missing service'; Args = @('unset', 'NssmRDefinitelyMissingService', 'AppParameters') },
     @{ Name = 'case-insensitive GET'; Args = @('GET', 'Spooler', 'Start') },
     @{ Name = 'status Spooler'; Args = @('STATUS', 'Spooler') },
     @{ Name = 'statuscode Spooler'; Args = @('STATUSCODE', 'Spooler') },
@@ -52,6 +55,7 @@ $cases = @(
     @{ Name = 'statuscode Schedule'; Args = @('statuscode', 'Schedule') },
     @{ Name = 'dump Schedule with output name'; Args = @('dump', 'Schedule', 'NssmRsDumpCopy') },
     @{ Name = 'processes Spooler'; Args = @('processes', 'Spooler') },
+    @{ Name = 'processes missing service and Spooler'; Args = @('processes', 'NssmRDefinitelyMissingService', 'Spooler') },
     @{ Name = 'status missing service'; Args = @('status', 'NssmRDefinitelyMissingService') },
     @{ Name = 'unknown setting on native service'; Args = @('get', 'Spooler', 'DefinitelyNotASetting') }
 )

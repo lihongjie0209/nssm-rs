@@ -2910,21 +2910,20 @@ fn process_tree_from_root(service: &str, root: u32) -> Result<(), String> {
 }
 
 fn processes(services: &[String]) -> Result<(), String> {
-    let mut errors = Vec::new();
+    let mut failed = false;
     for service in services {
         if missing_service_error(service).is_some() {
-            errors.push(missing_process_service_diagnostic());
+            let diagnostic = missing_process_service_diagnostic();
+            write_cli_output(&format!("{diagnostic}\r\n"), true);
+            failed = true;
             continue;
         }
         if let Err(error) = process_tree(service) {
-            errors.push(format!("{service}: {error}"));
+            write_cli_output(&format!("{service}: {error}\r\n"), true);
+            failed = true;
         }
     }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("\n"))
-    }
+    if failed { Err(String::new()) } else { Ok(()) }
 }
 
 fn registry_error(code: u32) -> String {
@@ -5340,7 +5339,9 @@ pub fn execute(command: Command) -> Result<u8, String> {
             Command::Processes(services) => match processes(&services) {
                 Ok(()) => Ok(0),
                 Err(error) => {
-                    cli_eprintln!("{error}\r");
+                    if !error.is_empty() {
+                        cli_eprintln!("{error}\r");
+                    }
                     Ok(1)
                 }
             },
