@@ -1724,8 +1724,15 @@ fn rotate(name: &str) -> Result<(), String> {
 
 fn wait_state(service: SC_HANDLE, expected: u32) -> Result<(), String> {
     for _ in 0..300 {
-        if state(service)? == expected {
+        let current = state(service)?;
+        if current == expected {
             return Ok(());
+        }
+        if current == SERVICE_STOPPED {
+            return Err(format!(
+                "service stopped before reaching {}",
+                state_name(expected)
+            ));
         }
         thread::sleep(Duration::from_millis(100));
     }

@@ -6,7 +6,7 @@ use std::{
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 static SERVICE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -844,6 +844,73 @@ fn runs_configured_start_and_exit_hooks() {
             .unwrap()
             .parse::<u64>()
             .is_ok()
+    );
+}
+
+#[test]
+fn start_pre_hook_exit_99_aborts_application_launch() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let hook_path = std::env::temp_dir().join(format!("{service}_hook.txt"));
+    let app_path = std::env::temp_dir().join(format!("{service}_app.txt"));
+    let hook_path = hook_path.to_string_lossy().into_owned();
+    let app_path = app_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![hook_path.clone(), app_path.clone()]);
+    let application = format!("echo app-started>\"{app_path}\"");
+    let installed = cli(&["install", &service, &command_prompt, "/c", &application]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+    let hook = format!("cmd.exe /c echo hook-fired>\"{hook_path}\" & exit 99");
+    let configured = cli(&["set", &service, "AppEvents", "Start/Pre", &hook]);
+    assert!(
+        configured.status.success(),
+        "hook set failed: {}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+
+    let start_time = Instant::now();
+    let started = cli(&["start", &service]);
+    assert!(
+        !started.status.success(),
+        "start reported success after the Start/Pre hook aborted startup"
+    );
+    assert!(
+        start_time.elapsed() < Duration::from_secs(5),
+        "start waited too long after SCM had already stopped the service: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let mut aborted = false;
+    for _ in 0..100 {
+        let status = cli(&["status", &service]);
+        let stopped = status.status.success()
+            && String::from_utf8_lossy(&status.stdout).trim() == "SERVICE_STOPPED";
+        let hook_ran = std::fs::read_to_string(&hook_path)
+            .is_ok_and(|contents| contents.trim() == "hook-fired");
+        if stopped && hook_ran {
+            aborted = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        aborted,
+        "Start/Pre hook did not run and abort startup: {:?}",
+        std::fs::read_to_string(&hook_path)
+    );
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        !std::path::Path::new(&app_path).exists(),
+        "application was launched after Start/Pre hook returned 99"
     );
 }
 
