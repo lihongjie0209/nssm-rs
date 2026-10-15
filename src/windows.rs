@@ -51,6 +51,9 @@ use windows_sys::Win32::{
     },
 };
 
+#[cfg(test)]
+use windows_sys::Win32::Foundation::SetLastError;
+
 const DELETE_ACCESS: u32 = 0x0001_0000;
 const STOP_SKIP_CONSOLE: u32 = 1;
 const SERVICE_INTERACTIVE_PROCESS_FLAG: u32 = 0x100;
@@ -2629,6 +2632,8 @@ enum ProcessImageError {
 
 #[cfg(test)]
 static FAIL_NEXT_PROCESS_SNAPSHOT: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_PROCESS_ENUMERATION: AtomicBool = AtomicBool::new(false);
 
 fn process_snapshot() -> io::Result<HANDLE> {
     #[cfg(test)]
@@ -2642,6 +2647,15 @@ fn process_snapshot() -> io::Result<HANDLE> {
     } else {
         Ok(snapshot)
     }
+}
+
+fn first_process_entry(snapshot: HANDLE, entry: *mut PROCESSENTRY32W) -> i32 {
+    #[cfg(test)]
+    if FAIL_NEXT_PROCESS_ENUMERATION.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(5) };
+        return 0;
+    }
+    unsafe { Process32FirstW(snapshot, entry) }
 }
 
 fn filetime_value(time: FILETIME) -> u64 {
@@ -2752,7 +2766,7 @@ fn process_tree_from_root(service: &str, root: u32) -> Result<(), String> {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
     };
-    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
+    let mut ok = first_process_entry(snapshot, &mut entry);
     if ok == 0 {
         let error = io::Error::last_os_error();
         let error_message = windows_error_message(&error);
@@ -5367,15 +5381,16 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 mod tests {
     use super::{
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
-        EVENT_SERVICE_CONTROL_UNKNOWN, FAIL_NEXT_PROCESS_SNAPSHOT, HOOK_LAST_APPLICATION_EXIT_CODE,
-        HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTROL_PAUSE,
-        SERVICE_CONTROL_POWEREVENT, elevation_arguments, elevation_parameters, ensure_event_source,
-        finish_async_hooks, hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger,
-        install, parse_u32, power_hook_action, power_hook_invocation, priority_name,
-        priority_value, process_belongs_to_service_lifetime, process_open_error_output,
-        process_tree_from_root, quote_dump_arg, remove, service_control_event, service_handler,
-        service_main, service_type_name, set_setting, valid_hook, wide,
+        EVENT_SERVICE_CONTROL_UNKNOWN, FAIL_NEXT_PROCESS_ENUMERATION, FAIL_NEXT_PROCESS_SNAPSHOT,
+        HOOK_LAST_APPLICATION_EXIT_CODE, HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE,
+        PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT,
+        SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT, elevation_arguments,
+        elevation_parameters, ensure_event_source, finish_async_hooks, hook_abi_environment,
+        hook_deadline_ms, hook_exit_code, hook_trigger, install, parse_u32, power_hook_action,
+        power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
+        process_open_error_output, process_tree_from_root, quote_dump_arg, remove,
+        service_control_event, service_handler, service_main, service_type_name, set_setting,
+        valid_hook, wide,
     };
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -5628,6 +5643,50 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         panic!("Application log contains event 1024 for the injected snapshot failure");
+    }
+
+    #[test]
+    fn process_enumeration_failure_reports_event_1025() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .expect("Windows event tests are serialized");
+        ensure_event_source().expect("test runner can register the NSSM event source");
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+        let before = std::process::Command::new(&powershell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$event = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='nssm'; Id=1025} -MaxEvents 1 -ErrorAction SilentlyContinue | Select-Object -First 1; if ($event) { [Console]::Write($event.RecordId) } else { [Console]::Write('0') }",
+            ])
+            .output()
+            .expect("query the latest event record");
+        assert!(before.status.success());
+        let before = String::from_utf8_lossy(&before.stdout)
+            .trim()
+            .parse::<u64>()
+            .expect("PowerShell returns the prior event record number");
+
+        FAIL_NEXT_PROCESS_ENUMERATION.store(true, Ordering::SeqCst);
+        process_tree_from_root("NssmRsEnumerationFailureTest", std::process::id())
+            .expect("process enumeration failure is reported and traversal returns");
+
+        let query = format!(
+            "$event = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1025}} -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object {{ $_.RecordId -gt {before} -and $_.Message.Contains('NssmRsEnumerationFailureTest') }} | Select-Object -First 1; if ($event) {{ exit 0 }}; exit 1"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if std::process::Command::new(&powershell)
+                .args(["-NoProfile", "-NonInteractive", "-Command", &query])
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        panic!("Application log contains event 1025 for injected enumeration failure");
     }
 
     #[test]
