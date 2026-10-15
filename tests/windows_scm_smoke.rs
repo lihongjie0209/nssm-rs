@@ -7,12 +7,12 @@ use std::{
 };
 
 fn cli(args: &[&str]) -> Output {
-    let binary = std::env::var_os("NSSM_R_TEST_BINARY")
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-r").into());
+    let binary = std::env::var_os("NSSM_RS_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-rs").into());
     Command::new(binary)
         .args(args)
         .output()
-        .expect("nssm-r starts")
+        .expect("nssm-rs starts")
 }
 
 fn service_name() -> String {

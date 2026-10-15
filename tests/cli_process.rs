@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_nssm-r"))
+    Command::new(env!("CARGO_BIN_EXE_nssm-rs"))
         .args(args)
         .output()
         .expect("binary should launch")

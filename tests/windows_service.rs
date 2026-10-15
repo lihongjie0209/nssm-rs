@@ -54,31 +54,31 @@ fn assert_hook_abi_present(environment: &std::collections::HashMap<String, Strin
 }
 
 fn cli(args: &[&str]) -> Output {
-    let binary = std::env::var_os("NSSM_R_TEST_BINARY")
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-r").into());
+    let binary = std::env::var_os("NSSM_RS_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-rs").into());
     Command::new(binary)
         .args(args)
         .output()
-        .expect("nssm-r executable starts")
+        .expect("nssm-rs executable starts")
 }
 
 fn cli_with_input(args: &[&str], input: &str) -> Output {
-    let binary = std::env::var_os("NSSM_R_TEST_BINARY")
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-r").into());
+    let binary = std::env::var_os("NSSM_RS_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-rs").into());
     let mut child = Command::new(binary)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("nssm-r starts with piped input");
+        .expect("nssm-rs starts with piped input");
     child
         .stdin
         .take()
         .expect("child stdin is piped")
         .write_all(input.as_bytes())
         .expect("confirmation is written");
-    child.wait_with_output().expect("nssm-r exits")
+    child.wait_with_output().expect("nssm-rs exits")
 }
 
 fn wait_for_service_state(service: &str, expected: &str) -> bool {
@@ -169,7 +169,7 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     assert!(exit_policy_before_start.stdout.is_empty());
 
     assert!(
-        cli(&["set", &service, "Description", "nssm-r test service"])
+        cli(&["set", &service, "Description", "nssm-rs test service"])
             .status
             .success()
     );
@@ -178,7 +178,7 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     assert!(description.stdout.ends_with(b"\r\n"));
     assert_eq!(
         String::from_utf8_lossy(&description.stdout).trim(),
-        "nssm-r test service"
+        "nssm-rs test service"
     );
     assert!(cli(&["reset", &service, "Description"]).status.success());
 
@@ -283,7 +283,7 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     let copied_service = "NssmR Dump Copy";
     let _copy_cleanup = Cleanup(copied_service.to_owned());
     for line in dump.lines() {
-        let parsed = nssm_r::split_windows_args(line);
+        let parsed = nssm_rs::split_windows_args(line);
         assert!(
             parsed.len() >= 2,
             "dump emitted an incomplete command: {line}"
@@ -783,7 +783,7 @@ fn verify_service_shutdown_signal(arguments: &[&str], skip: &str, expected: &str
     let marker = marker.to_string_lossy().into_owned();
     let started_marker = format!("{marker}.started");
     let _files = FileCleanup(vec![marker.clone(), started_marker.clone()]);
-    let fixture = std::env::var_os("NSSM_R_TEST_FIXTURE")
+    let fixture = std::env::var_os("NSSM_RS_TEST_FIXTURE")
         .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
         .expect("Cargo builds the console signal fixture");
     let fixture = fixture.to_string_lossy().into_owned();
@@ -1166,7 +1166,7 @@ fn launches_unicode_application_path_and_preserves_windows_arguments() {
     let working_directory = std::env::temp_dir().join(format!("{service}_雪"));
     std::fs::create_dir_all(&working_directory).expect("unicode working directory is created");
     let application = working_directory.join("服务 fixture.exe");
-    let fixture = std::env::var_os("NSSM_R_TEST_FIXTURE")
+    let fixture = std::env::var_os("NSSM_RS_TEST_FIXTURE")
         .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
         .expect("console signal fixture is built");
     std::fs::copy(fixture, &application).expect("fixture is copied to unicode path");
@@ -1180,13 +1180,13 @@ fn launches_unicode_application_path_and_preserves_windows_arguments() {
         String::new(),
     ];
     let raw_parameters = std::iter::once("capture-args".to_owned())
-        .chain(std::iter::once(nssm_r::quote_windows_arg(
+        .chain(std::iter::once(nssm_rs::quote_windows_arg(
             &capture_path.to_string_lossy(),
         )))
         .chain(
             captured_arguments
                 .iter()
-                .map(|argument| nssm_r::quote_windows_arg(argument)),
+                .map(|argument| nssm_rs::quote_windows_arg(argument)),
         )
         .collect::<Vec<_>>()
         .join(" ");
@@ -1244,7 +1244,7 @@ fn applies_configured_priority_and_cpu_affinity_to_child_process() {
     let capture_path = std::env::temp_dir().join(format!("{service}_process_info.txt"));
     let capture_path = capture_path.to_string_lossy().into_owned();
     let _files = FileCleanup(vec![capture_path.clone()]);
-    let fixture = std::env::var_os("NSSM_R_TEST_FIXTURE")
+    let fixture = std::env::var_os("NSSM_RS_TEST_FIXTURE")
         .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
         .expect("console signal fixture is built");
     let fixture = fixture.to_string_lossy().into_owned();
@@ -1254,7 +1254,7 @@ fn applies_configured_priority_and_cpu_affinity_to_child_process() {
     );
     let parameters = format!(
         "capture-process-info {}",
-        nssm_r::quote_windows_arg(&capture_path)
+        nssm_rs::quote_windows_arg(&capture_path)
     );
     assert!(
         cli(&["set", &service, "AppParameters", &parameters])

@@ -1,7 +1,7 @@
-use nssm_r::{Command, VERSION, parse_args};
+use nssm_rs::{Command, VERSION, parse_args};
 use std::process::ExitCode;
 
-const USAGE: &str = "nssm-r: Windows service wrapper\n\nUsage: nssm-r <command> [arguments]\n\nCommands: install, remove, start, stop, restart, pause, continue, status, statuscode, get, set, reset, unset, rotate, list, dump, processes, help, version\n";
+const USAGE: &str = "nssm-rs: Windows service wrapper\n\nUsage: nssm-rs <command> [arguments]\n\nCommands: install, remove, start, stop, restart, pause, continue, status, statuscode, get, set, reset, unset, rotate, list, dump, processes, help, version\n";
 
 fn run(args: &[String]) -> Result<u8, String> {
     match parse_args(args).map_err(|e| e.to_string())? {
@@ -14,16 +14,16 @@ fn run(args: &[String]) -> Result<u8, String> {
         }
         Command::Version => {
             #[cfg(windows)]
-            println!("nssm-r {VERSION}\r");
+            println!("nssm-rs {VERSION}\r");
             #[cfg(not(windows))]
-            println!("nssm-r {VERSION}");
+            println!("nssm-rs {VERSION}");
             Ok(0)
         }
         command => {
             #[cfg(not(windows))]
             {
                 let _ = command;
-                Err("nssm-r manages Windows services and must run on Windows".into())
+                Err("nssm-rs manages Windows services and must run on Windows".into())
             }
             #[cfg(windows)]
             {
@@ -41,7 +41,7 @@ fn main() -> ExitCode {
             return match args.get(1).map(|s| crate::windows::run_service(s)) {
                 Some(Ok(())) => ExitCode::SUCCESS,
                 Some(Err(error)) => {
-                    eprintln!("nssm-r service host: {error}\r");
+                    eprintln!("nssm-rs service host: {error}\r");
                     ExitCode::FAILURE
                 }
                 None => ExitCode::FAILURE,
@@ -56,9 +56,9 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             #[cfg(windows)]
-            eprintln!("nssm-r: {e}\r");
+            eprintln!("nssm-rs: {e}\r");
             #[cfg(not(windows))]
-            eprintln!("nssm-r: {e}");
+            eprintln!("nssm-rs: {e}");
             ExitCode::FAILURE
         }
     }
@@ -66,7 +66,7 @@ fn main() -> ExitCode {
 
 #[cfg(windows)]
 mod windows_backend {
-    use nssm_r::Command;
+    use nssm_rs::Command;
     pub fn execute(command: Command) -> Result<u8, String> {
         crate::windows::execute(command)
     }

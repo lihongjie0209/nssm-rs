@@ -1,4 +1,4 @@
-use nssm_r::{
+use nssm_rs::{
     Command, ExitAction, MANAGED_SETTINGS, SettingKind, StopMethod, compose_child_environment,
     edit_dependencies, edit_environment, expand_environment_value, log_rotation_due,
     managed_setting, normalize_cpu_affinity, normalize_exit_action, parse_cpu_affinity,
@@ -444,7 +444,7 @@ fn encode_multi_string(values: &[String]) -> Vec<u8> {
 
 fn setting_location(
     service: &str,
-    spec: &nssm_r::SettingSpec,
+    spec: &nssm_rs::SettingSpec,
     additional: Option<&str>,
     create: bool,
 ) -> Result<(RegKey, Option<String>), String> {
@@ -1182,7 +1182,7 @@ fn set_native_setting(service: &str, parameter: &str, values: &[String]) -> Resu
                         _ => username,
                     };
                     let password_buffer =
-                        if !nssm_r::object_account_requires_password(account, service) {
+                        if !nssm_rs::object_account_requires_password(account, service) {
                             None
                         } else {
                             if values.len() < 2 {
@@ -1607,7 +1607,7 @@ fn dump_native_settings(executable: &str, source: &str, target: &str) -> Result<
 
 fn dump_service(source: &str, target: Option<&str>) -> Result<(), String> {
     let application = read_optional_reg_string(source, "Application")?
-        .ok_or_else(|| format!("service {source} is not managed by nssm-r"))?;
+        .ok_or_else(|| format!("service {source} is not managed by nssm-rs"))?;
     let target = target.unwrap_or(source);
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let executable = executable.to_string_lossy();
@@ -2590,7 +2590,7 @@ fn wait_process_for(child: &mut Child, grace: Duration) -> bool {
 fn stop_child(service: &str, child: &mut ManagedChild, no_console: bool) -> Result<(), String> {
     let skip = read_reg_dword(service, "AppStopMethodSkip", 0)?;
     let pid = child.child.id();
-    for method in nssm_r::stop_methods(skip, no_console) {
+    for method in nssm_rs::stop_methods(skip, no_console) {
         match method {
             StopMethod::Console | StopMethod::Window | StopMethod::Threads => {
                 let (setting, signal) = match method {
@@ -2903,7 +2903,7 @@ fn invoke_hook(
         .env("NSSM_SERVICE_NAME", service)
         .env("NSSM_SERVICE_DISPLAYNAME", display_name)
         .env("NSSM_EXE", image)
-        .env("NSSM_VERSION", nssm_r::VERSION)
+        .env("NSSM_VERSION", nssm_rs::VERSION)
         .env("NSSM_PID", std::process::id().to_string())
         .env(
             "NSSM_LAST_CONTROL",
@@ -3174,7 +3174,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     let stderr_copy_and_truncate =
         read_reg_dword(&service_name, "AppStderrCopyAndTruncate", 0).unwrap_or(0) != 0;
     let timestamp_log = read_reg_dword(&service_name, "AppTimestampLog", 0).unwrap_or(0) != 0;
-    let mut throttle = nssm_r::RestartThrottle::new(restart_delay_ms);
+    let mut throttle = nssm_rs::RestartThrottle::new(restart_delay_ms);
     let mut stop_hook_invoked = false;
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
         HOOK_START_REQUESTED_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -3797,7 +3797,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
             }
             if let Err(error) = open_service(&service, SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG)
             {
-                eprintln!("nssm-r: {error}\r");
+                eprintln!("nssm-rs: {error}\r");
                 return Ok(3);
             }
             if read_optional_reg_string(&service, "Application")
@@ -3805,13 +3805,13 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 .flatten()
                 .is_none()
             {
-                eprintln!("nssm-r: AppAffinity is only valid for nssm-r services\r");
+                eprintln!("nssm-rs: AppAffinity is only valid for nssm-rs services\r");
                 return Ok(1);
             }
             match set_setting(&service, &parameter, &values) {
                 Ok(()) => Ok(0),
                 Err(error) => {
-                    eprintln!("nssm-r: {error}\r");
+                    eprintln!("nssm-rs: {error}\r");
                     Ok(6)
                 }
             }
@@ -3839,7 +3839,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 | Command::Version => None,
             };
             if let Some(service) = service.filter(|service| service_is_missing(service)) {
-                eprintln!("nssm-r: service '{service}' does not exist\r");
+                eprintln!("nssm-rs: service '{service}' does not exist\r");
                 return Ok(3);
             }
             match command {
@@ -3850,7 +3850,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 } if known_setting(&parameter) => match get_setting(&service, &parameter, &extra) {
                     Ok(()) => Ok(0),
                     Err(error) => {
-                        eprintln!("nssm-r: {error}\r");
+                        eprintln!("nssm-rs: {error}\r");
                         Ok(5)
                     }
                 },
@@ -3862,7 +3862,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
                     match set_setting(&service, &parameter, &values) {
                         Ok(()) => Ok(0),
                         Err(error) => {
-                            eprintln!("nssm-r: {error}\r");
+                            eprintln!("nssm-rs: {error}\r");
                             Ok(6)
                         }
                     }
@@ -3880,7 +3880,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
                     match reset_setting(&service, &parameter, &extra) {
                         Ok(()) => Ok(0),
                         Err(error) => {
-                            eprintln!("nssm-r: {error}\r");
+                            eprintln!("nssm-rs: {error}\r");
                             Ok(6)
                         }
                     }

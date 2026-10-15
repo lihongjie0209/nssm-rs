@@ -1,4 +1,4 @@
-use nssm_r::{
+use nssm_rs::{
     Command, ExitAction, edit_environment, parse_args, quote_windows_arg, split_windows_args,
 };
 

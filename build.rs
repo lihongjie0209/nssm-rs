@@ -75,14 +75,14 @@ fn build_event_message_resource() {
     } else {
         &[][..]
     };
-    let Some(mc) = find_tool(mc_name, "NSSM_R_MC", mc_alternates) else {
+    let Some(mc) = find_tool(mc_name, "NSSM_RS_MC", mc_alternates) else {
         if target.ends_with("-msvc") {
             panic!("Windows SDK mc.exe is required to build the event message resource");
         }
         println!("cargo:warning=windmc not found; Windows event descriptions will be unavailable");
         return;
     };
-    let Some(rc) = find_tool(rc_name, "NSSM_R_RC", rc_alternates) else {
+    let Some(rc) = find_tool(rc_name, "NSSM_RS_RC", rc_alternates) else {
         if target.ends_with("-msvc") {
             panic!("Windows SDK rc.exe is required to build the event message resource");
         }

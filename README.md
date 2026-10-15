@@ -1,4 +1,4 @@
-# nssm-r
+# nssm-rs
 
 An independent Rust reimplementation of the command-line portion of NSSM, the Windows service wrapper. The project does not include a graphical installer.
 
@@ -11,7 +11,7 @@ cargo build --release
 cargo test
 ```
 
-The binary is named `nssm-r.exe`. On non-Windows hosts, `help` and `version` work; Windows SCM operations require Windows.
+The binary is named `nssm-rs.exe`. On non-Windows hosts, `help` and `version` work; Windows SCM operations require Windows.
 
 ## Intended CLI compatibility
 

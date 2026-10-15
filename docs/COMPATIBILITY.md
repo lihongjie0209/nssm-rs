@@ -1,6 +1,6 @@
 # NSSM CLI compatibility plan and acceptance criteria
 
-This is the implementation contract for nssm-r. Reference: the locally cloned
+This is the implementation contract for nssm-rs. Reference: the locally cloned
 [`ONLYOFFICE/nssm`](https://github.com/ONLYOFFICE/nssm) tree at commit
 `f28f043161cf6d21c2bf5f923c23b1fbe74d236d`. The target is its command-line
 interface and Windows service behavior. GUI workflows are explicitly excluded.
@@ -94,7 +94,7 @@ numeric SCM state as its process exit code; query failure returns zero.
   process launch/restart/stop; all three standard streams; descendants; rotation;
   hooks; account/dependency configuration where test privileges permit.
 - Compatibility: run equivalent scenarios against the pinned NSSM reference and
-  nssm-r in a disposable Windows VM, compare service configuration, output,
+  nssm-rs in a disposable Windows VM, compare service configuration, output,
   statuses, side effects and observable process behavior. Document intentional
   differences (ideally none for the stated CLI target).
 
