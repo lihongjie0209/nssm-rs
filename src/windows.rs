@@ -47,8 +47,10 @@ use windows_sys::Win32::{
 const DELETE_ACCESS: u32 = 0x0001_0000;
 const STOP_SKIP_CONSOLE: u32 = 1;
 const EVENT_DISPATCHER_FAILED: u32 = 0xc000_03e9;
+const EVENT_START_SERVICE_FAILED: u32 = 0xc000_03ee;
 const EVENT_STARTED_SERVICE: u32 = 0x4000_03f0;
 const EVENT_CREATEPROCESS_FAILED: u32 = 0xc000_03f2;
+const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
 static SERVICE_STATUS_HANDLE_VALUE: AtomicIsize = AtomicIsize::new(0);
@@ -2869,6 +2871,15 @@ fn exit_action(service: &str, code: u32) -> Result<(ExitAction, bool), String> {
 }
 
 fn set_status(state: u32, exit_code: u32, wait_hint: u32) {
+    set_status_with_service_exit(state, exit_code, 0, wait_hint);
+}
+
+fn set_status_with_service_exit(
+    state: u32,
+    win32_exit_code: u32,
+    service_exit_code: u32,
+    wait_hint: u32,
+) {
     let handle = SERVICE_STATUS_HANDLE_VALUE.load(Ordering::SeqCst) as SERVICE_STATUS_HANDLE;
     if handle.is_null() {
         return;
@@ -2888,8 +2899,8 @@ fn set_status(state: u32, exit_code: u32, wait_hint: u32) {
             }
             _ => 0,
         },
-        dwWin32ExitCode: exit_code,
-        dwServiceSpecificExitCode: 0,
+        dwWin32ExitCode: win32_exit_code,
+        dwServiceSpecificExitCode: service_exit_code,
         dwCheckPoint: 0,
         dwWaitHint: wait_hint,
     };
@@ -3227,7 +3238,21 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                     EVENT_CREATEPROCESS_FAILED,
                     &[&service_name, &app, &error],
                 );
-                set_status(SERVICE_STOPPED, 2, 0);
+                report_event(
+                    EVENTLOG_ERROR_TYPE,
+                    EVENT_START_SERVICE_FAILED,
+                    &[
+                        &app,
+                        &service_name,
+                        &SERVICE_LAUNCH_FAILURE_CODE.to_string(),
+                    ],
+                );
+                set_status_with_service_exit(
+                    SERVICE_STOPPED,
+                    windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                    SERVICE_LAUNCH_FAILURE_CODE,
+                    0,
+                );
                 return;
             }
         };

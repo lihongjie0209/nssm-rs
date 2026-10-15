@@ -419,6 +419,43 @@ fn logs_child_process_launch_failures_to_the_application_event_log() {
         event_found,
         "Application log contains NSSM event 1010 with service and application values"
     );
+
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1006}} -MaxEvents 40 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{missing_application}' -and $event.Properties[1].Value -eq '{service}' -and $event.Properties[2].Value -eq 3 -and $event.Message.Contains(\"Can't start\")) {{ exit 0 }} }}; exit 1"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut event_found = false;
+    while Instant::now() < deadline {
+        event_found = Command::new(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .is_ok_and(|status| status.success());
+        if event_found {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        event_found,
+        "Application log contains NSSM event 1006 with the service-specific start failure code"
+    );
+    let status = Command::new("sc.exe")
+        .args(["query", &service])
+        .output()
+        .expect("SCM status query runs");
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status
+            .lines()
+            .any(|line| line.contains("WIN32_EXIT_CODE") && line.contains("1066")),
+        "{status}"
+    );
+    assert!(
+        status
+            .lines()
+            .any(|line| line.contains("SERVICE_EXIT_CODE") && line.contains("3")),
+        "{status}"
+    );
 }
 
 #[test]
