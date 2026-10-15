@@ -1,8 +1,9 @@
 #![cfg(windows)]
 
 use std::{
+    io::Write,
     os::windows::io::AsRawHandle,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -15,6 +16,23 @@ fn cli(args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("nssm-r executable starts")
+}
+
+fn cli_with_input(args: &[&str], input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nssm-r"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("nssm-r starts with piped input");
+    child
+        .stdin
+        .take()
+        .expect("child stdin is piped")
+        .write_all(input.as_bytes())
+        .expect("confirmation is written");
+    child.wait_with_output().expect("nssm-r exits")
 }
 
 fn wait_for_service_state(service: &str, expected: &str) -> bool {
@@ -337,6 +355,47 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         "remove failed: {}",
         String::from_utf8_lossy(&removed.stderr)
     );
+}
+
+#[test]
+fn remove_prompts_and_honors_negative_and_positive_confirmation() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let ping = format!("{windows}\\System32\\PING.EXE");
+    let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let declined = cli_with_input(&["remove", &service], "n\n");
+    assert!(!declined.status.success());
+    assert!(String::from_utf8_lossy(&declined.stderr).contains("removal cancelled"));
+    let still_installed = cli(&["get", &service, "Name"]);
+    assert!(still_installed.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&still_installed.stdout).trim(),
+        service
+    );
+
+    let confirmed = cli_with_input(&["remove", &service], "yes\n");
+    assert!(
+        confirmed.status.success(),
+        "confirmed removal failed: {}",
+        String::from_utf8_lossy(&confirmed.stderr)
+    );
+    let mut disappeared = false;
+    for _ in 0..100 {
+        let status = cli(&["status", &service]);
+        if !status.status.success() {
+            disappeared = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(disappeared, "confirmed service removal did not take effect");
 }
 
 #[test]
