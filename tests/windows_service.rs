@@ -539,13 +539,17 @@ fn runs_configured_start_and_exit_hooks() {
     );
     for ((event_action, marker), path) in [
         ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_CONFIGURATION% %NSSM_START_REQUESTED_COUNT% %NSSM_START_COUNT% %NSSM_EXIT_COUNT% %NSSM_THROTTLE_COUNT% %NSSM_RUNTIME% %NSSM_LAST_CONTROL% %NSSM_SERVICE_DISPLAYNAME%"),
-        ("Start/Post", "set NSSM_COMMAND_LINE"),
+        ("Start/Post", ""),
         ("Exit/Post", "exit-post %NSSM_EXIT_COUNT% %NSSM_START_COUNT% %NSSM_APPLICATION_RUNTIME%"),
     ]
     .into_iter()
     .zip(&event_paths)
     {
-        let hook = format!("cmd.exe /c echo {marker}>{path}");
+        let hook = if event_action == "Start/Post" {
+            format!("cmd.exe /c set NSSM_COMMAND_LINE>{path}")
+        } else {
+            format!("cmd.exe /c echo {marker}>{path}")
+        };
         let configured = cli(&["set", &service, "AppEvents", event_action, &hook]);
         assert!(
             configured.status.success(),
