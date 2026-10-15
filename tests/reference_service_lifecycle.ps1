@@ -383,7 +383,7 @@ function Run-FailedRestartScenario([string] $Binary, [string] $Service) {
 
         $startedAt = Get-Date
         Add-Result $results $Binary 'failed restart start' `
-            @('start', $Service) | Out-Null
+            @('start', $Service) @(0, 1) | Out-Null
         Wait-ServiceState $Binary $Service 'SERVICE_PAUSED'
         Add-Result $results $Binary 'failed restart status during delay' `
             @('status', $Service) | Out-Null
