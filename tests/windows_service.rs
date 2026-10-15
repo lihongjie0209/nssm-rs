@@ -533,6 +533,12 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
             .any(|line| line == service)
     );
 
+    let code_action = cli(&["set", &service, "AppExit", "23", "Ignore"]);
+    assert!(
+        code_action.status.success(),
+        "setting exit-code action failed: {}",
+        String::from_utf8_lossy(&code_action.stderr)
+    );
     let dump = cli(&["dump", &service, "NssmR Dump Copy"]);
     assert!(
         dump.status.success(),
@@ -547,6 +553,12 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     );
     assert!(dump.contains("set \"NssmR Dump Copy\" AppParameters \"-t 127.0.0.1\""));
     assert!(dump.contains("set \"NssmR Dump Copy\" AppExit Default Restart"));
+    assert_eq!(
+        dump.matches("set \"NssmR Dump Copy\" AppExit Default Restart")
+            .count(),
+        2,
+        "NSSM dumps the default action once per AppExit registry value"
+    );
     assert!(
         dump.to_ascii_lowercase()
             .contains("set \"nssmr dump copy\" appdirectory c:\\windows\\system32")
