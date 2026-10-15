@@ -3373,6 +3373,56 @@ fn stdio_file_creation_failure_logs_reference_events_and_stops_startup() {
 }
 
 #[test]
+fn invalid_stdio_numeric_setting_logs_query_and_startup_failure_events() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let stdout_path = std::env::temp_dir()
+        .join(format!("{service}_stdout.log"))
+        .to_string_lossy()
+        .into_owned();
+    let _files = FileCleanup(vec![stdout_path.clone()]);
+    assert!(
+        cli(&["install", &service, &command_prompt, "/c", "exit 0"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppStdout", &stdout_path])
+            .status
+            .success()
+    );
+
+    let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
+    let write_invalid_value = format!(
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppStdoutCopyAndTruncate -PropertyType String -Value 'invalid-copy-flag' -Force"
+    );
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    assert!(
+        Command::new(&powershell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &write_invalid_value
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+    );
+
+    let _ = cli(&["start", &service]);
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1006,1018,1051)}} -MaxEvents 300 -ErrorAction SilentlyContinue; $query = $false; $handles = $false; $start = $false; foreach ($event in $events) {{ if ($event.Id -eq 1018 -and $event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq 'AppStdoutCopyAndTruncate') {{ $query = $true }}; if ($event.Id -eq 1051 -and $event.Properties.Count -ge 1 -and $event.Properties[0].Value -eq '{service}') {{ $handles = $true }}; if ($event.Id -eq 1006 -and $event.Properties.Count -ge 3 -and $event.Properties[0].Value -eq '{command_prompt}' -and $event.Properties[1].Value -eq '{service}' -and $event.Properties[2].Value -eq 4) {{ $start = $true }} }}; if ($query -and $handles -and $start) {{ exit 0 }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&script),
+        "invalid stdio flag logs query error 1018, output setup failure 1051, and start failure 1006"
+    );
+}
+
+#[test]
 fn ignore_and_exit_actions_have_distinct_service_lifecycles() {
     let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     let command_prompt = format!("{windows}\\System32\\cmd.exe");
