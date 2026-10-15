@@ -991,10 +991,16 @@ fn runs_configured_start_and_exit_hooks() {
     let cwd_marker = cwd_marker.to_string_lossy().into_owned();
     let abi_marker = std::env::temp_dir().join(format!("{service}_hook_abi.txt"));
     let abi_marker = abi_marker.to_string_lossy().into_owned();
+    let exit_abi_marker = std::env::temp_dir().join(format!("{service}_exit_hook_abi.txt"));
+    let exit_abi_marker = exit_abi_marker.to_string_lossy().into_owned();
     let _files = FileCleanup(
         [
             event_paths.clone(),
-            vec![cwd_marker.clone(), abi_marker.clone()],
+            vec![
+                cwd_marker.clone(),
+                abi_marker.clone(),
+                exit_abi_marker.clone(),
+            ],
         ]
         .concat(),
     );
@@ -1031,6 +1037,8 @@ fn runs_configured_start_and_exit_hooks() {
                 format!(
                     "cmd.exe /c echo {marker}>{path} & cd > {cwd_marker} & set NSSM_ > {abi_marker}"
                 )
+            } else if event_action == "Exit/Post" {
+                format!("cmd.exe /c echo {marker}>{path} & set NSSM_ > {exit_abi_marker}")
             } else {
                 format!("cmd.exe /c echo {marker}>{path}")
             }
@@ -1053,6 +1061,7 @@ fn runs_configured_start_and_exit_hooks() {
         hooks_ran = event_paths
             .iter()
             .all(|path| std::path::Path::new(path).is_file())
+            && std::path::Path::new(&exit_abi_marker).is_file()
             && std::fs::read_to_string(&event_paths[1])
                 .is_ok_and(|contents| contents.starts_with("NSSM_COMMAND_LINE=\""))
             && std::fs::read_to_string(&event_paths[2])
@@ -1146,6 +1155,83 @@ fn runs_configured_start_and_exit_hooks() {
     );
     assert!(hook_environment["NSSM_PID"].parse::<u32>().unwrap() > 0);
     assert!(std::path::Path::new(&hook_environment["NSSM_EXE"]).is_file());
+    let expected_abi_variables = [
+        "NSSM_HOOK_VERSION",
+        "NSSM_EVENT",
+        "NSSM_ACTION",
+        "NSSM_TRIGGER",
+        "NSSM_LAST_CONTROL",
+        "NSSM_EXE",
+        "NSSM_CONFIGURATION",
+        "NSSM_VERSION",
+        "NSSM_BUILD_DATE",
+        "NSSM_PID",
+        "NSSM_RUNTIME",
+        "NSSM_APPLICATION_PID",
+        "NSSM_APPLICATION_RUNTIME",
+        "NSSM_EXITCODE",
+        "NSSM_DEADLINE",
+        "NSSM_SERVICE_NAME",
+        "NSSM_SERVICE_DISPLAYNAME",
+        "NSSM_START_REQUESTED_COUNT",
+        "NSSM_START_COUNT",
+        "NSSM_EXIT_COUNT",
+        "NSSM_THROTTLE_COUNT",
+        "NSSM_COMMAND_LINE",
+    ];
+    for variable in expected_abi_variables {
+        assert!(
+            hook_environment.contains_key(variable),
+            "Start/Pre hook ABI omitted {variable}"
+        );
+    }
+    let architecture = if cfg!(target_pointer_width = "64") {
+        "64-bit"
+    } else {
+        "32-bit"
+    };
+    let configuration = if cfg!(debug_assertions) {
+        format!("{architecture} debug")
+    } else {
+        architecture.to_owned()
+    };
+    assert_eq!(hook_environment["NSSM_EVENT"], "Start");
+    assert_eq!(hook_environment["NSSM_ACTION"], "Pre");
+    assert_eq!(hook_environment["NSSM_TRIGGER"], "START");
+    assert_eq!(hook_environment["NSSM_LAST_CONTROL"], "START");
+    assert_eq!(hook_environment["NSSM_CONFIGURATION"], configuration);
+    assert_eq!(hook_environment["NSSM_DEADLINE"], "20000");
+    assert_eq!(hook_environment["NSSM_START_REQUESTED_COUNT"], "1");
+    assert_eq!(hook_environment["NSSM_START_COUNT"], "0");
+    assert_eq!(hook_environment["NSSM_EXIT_COUNT"], "0");
+    assert_eq!(hook_environment["NSSM_THROTTLE_COUNT"], "0");
+    assert!(hook_environment["NSSM_RUNTIME"].parse::<u64>().is_ok());
+    assert!(hook_environment["NSSM_COMMAND_LINE"].starts_with('"'));
+
+    let exit_abi =
+        std::fs::read_to_string(&exit_abi_marker).expect("Exit/Post hook ABI is captured");
+    let exit_environment = exit_abi
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_ascii_uppercase(), value.trim().to_owned()))
+        .collect::<std::collections::HashMap<_, _>>();
+    for variable in expected_abi_variables {
+        assert!(
+            exit_environment.contains_key(variable),
+            "Exit/Post hook ABI omitted {variable}"
+        );
+    }
+    assert_eq!(exit_environment["NSSM_EVENT"], "Exit");
+    assert_eq!(exit_environment["NSSM_ACTION"], "Post");
+    assert_eq!(exit_environment["NSSM_TRIGGER"], "");
+    assert_eq!(exit_environment["NSSM_APPLICATION_PID"], "");
+    assert_eq!(exit_environment["NSSM_EXITCODE"], "0");
+    assert_eq!(exit_environment["NSSM_EXIT_COUNT"], "1");
+    assert!(
+        exit_environment["NSSM_APPLICATION_RUNTIME"]
+            .parse::<u64>()
+            .is_ok()
+    );
     let start_post = std::fs::read_to_string(&event_paths[1]).unwrap();
     assert!(start_post.starts_with("NSSM_COMMAND_LINE=\""));
     assert!(start_post.contains("cmd.exe\""));
