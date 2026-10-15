@@ -450,6 +450,49 @@ fn logs_service_dispatcher_failures_to_the_application_event_log() {
     );
 }
 
+#[test]
+fn logs_successful_child_process_starts_to_the_application_event_log() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let application =
+        std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()) + "\\System32\\PING.EXE";
+    let installed = cli(&["install", &service, &application, "-t", "127.0.0.1"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1008}} -MaxEvents 40 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 4 -and $event.Properties[0].Value -eq '{application}' -and $event.Properties[1].Value -eq '-t 127.0.0.1' -and $event.Properties[2].Value -eq '{service}' -and $event.Message.Contains('Started')) {{ exit 0 }} }}; exit 1"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut event_found = false;
+    while Instant::now() < deadline {
+        event_found = Command::new(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .is_ok_and(|status| status.success());
+        if event_found {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        event_found,
+        "Application log contains NSSM event 1008 with executable, arguments and service"
+    );
+    assert!(cli(&["stop", &service]).status.success());
+}
+
 fn verify_service_shutdown_signal(arguments: &[&str], skip: &str, expected: &str) {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());

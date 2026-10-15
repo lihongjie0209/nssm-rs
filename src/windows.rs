@@ -47,6 +47,7 @@ use windows_sys::Win32::{
 const DELETE_ACCESS: u32 = 0x0001_0000;
 const STOP_SKIP_CONSOLE: u32 = 1;
 const EVENT_DISPATCHER_FAILED: u32 = 0xc000_03e9;
+const EVENT_STARTED_SERVICE: u32 = 0x4000_03f0;
 const EVENT_CREATEPROCESS_FAILED: u32 = 0xc000_03f2;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
@@ -3306,6 +3307,20 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         }
         let child_started = Instant::now();
         set_status(SERVICE_RUNNING, 0, 0);
+        let parameters = read_optional_reg_string(&service_name, "AppParameters")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+            EVENT_STARTED_SERVICE,
+            &[
+                &app,
+                &parameters,
+                &service_name,
+                directory.as_deref().unwrap_or(""),
+            ],
+        );
         let mut child_exit_code = 1;
         let mut rotation_check = Instant::now();
         loop {
