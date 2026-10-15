@@ -553,6 +553,67 @@ fn runs_configured_start_and_exit_hooks() {
 }
 
 #[test]
+fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let marker_path = std::env::temp_dir().join(format!("{service}_restart.txt"));
+    let marker_path = marker_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![marker_path.clone()]);
+    let installed = cli(&["install", &service, &command_prompt, "/c", "exit 23"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(cli(&["set", &service, "AppThrottle", "0"]).status.success());
+    assert!(
+        cli(&["set", &service, "AppExit", "23", "Restart"])
+            .status
+            .success()
+    );
+    let hook = format!("cmd.exe /c echo exit>>\"{marker_path}\"");
+    assert!(
+        cli(&["set", &service, "AppEvents", "Exit/Post", &hook])
+            .status
+            .success()
+    );
+
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let mut repeated = false;
+    for _ in 0..100 {
+        repeated = std::fs::read_to_string(&marker_path)
+            .is_ok_and(|contents| contents.lines().count() >= 3);
+        if repeated {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        repeated,
+        "exit policy did not restart the application three times"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&cli(&["status", &service]).stdout).trim(),
+        "SERVICE_RUNNING"
+    );
+
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+}
+
+#[test]
 fn startup_rotation_preserves_existing_log_and_creates_a_fresh_active_file() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
