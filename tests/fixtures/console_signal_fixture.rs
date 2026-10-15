@@ -15,9 +15,25 @@ fn main() {
         SIGNAL.store(event + 1, Ordering::SeqCst);
         1
     }
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().is_some_and(|mode| mode == "capture-args") {
+        let output = arguments.get(1).expect("argument capture path configured");
+        std::fs::write(
+            output,
+            arguments
+                .iter()
+                .skip(2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .expect("write captured arguments");
+        return;
+    }
+
     let marker = std::env::var_os("NSSM_SIGNAL_MARKER").expect("marker configured");
     let started = std::env::var_os("NSSM_STARTED_MARKER").expect("startup marker configured");
-    match std::env::args().nth(1).as_deref() {
+    match arguments.first().map(String::as_str) {
         Some("thread") => {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 GetMessageW, MSG, PM_NOREMOVE, PeekMessageW,

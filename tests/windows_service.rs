@@ -1039,6 +1039,67 @@ fn passes_replacement_and_expanded_extra_environment_to_child() {
 }
 
 #[test]
+fn launches_unicode_application_path_and_preserves_windows_arguments() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let working_directory = std::env::temp_dir().join(format!("{service}_雪"));
+    std::fs::create_dir_all(&working_directory).expect("unicode working directory is created");
+    let application = working_directory.join("服务 fixture.exe");
+    let fixture = std::env::var_os("NSSM_R_TEST_FIXTURE")
+        .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
+        .expect("console signal fixture is built");
+    std::fs::copy(fixture, &application).expect("fixture is copied to unicode path");
+    let capture_path = working_directory.join("参数输出.txt");
+    let captured_arguments = vec![
+        "plain".to_owned(),
+        "two words".to_owned(),
+        "雪与火".to_owned(),
+        "embedded\"quote".to_owned(),
+        "trailing slash\\".to_owned(),
+        String::new(),
+    ];
+    let raw_parameters = std::iter::once("capture-args".to_owned())
+        .chain(std::iter::once(nssm_r::quote_windows_arg(
+            &capture_path.to_string_lossy(),
+        )))
+        .chain(
+            captured_arguments
+                .iter()
+                .map(|argument| nssm_r::quote_windows_arg(argument)),
+        )
+        .collect::<Vec<_>>()
+        .join(" ");
+    let application = application.to_string_lossy().into_owned();
+    assert!(cli(&["install", &service, &application]).status.success());
+    assert!(
+        cli(&["set", &service, "AppParameters", &raw_parameters])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "service start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(
+        wait_for_service_state(&service, "SERVICE_STOPPED"),
+        "service did not stop after its argument-capture child exited"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&capture_path).expect("child captures received arguments"),
+        captured_arguments.join("\n")
+    );
+    std::fs::remove_dir_all(working_directory).expect("unicode fixture directory is removed");
+}
+
+#[test]
 fn timestamp_log_prefixes_each_child_output_line_in_utc() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());

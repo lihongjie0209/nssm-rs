@@ -127,7 +127,10 @@ when enabled; Windows integration tests check backup data, continued output and
 active-file identity for both modes. The Windows suite also verifies that SCM stop reaches responding children through
 CTRL+C, WM_CLOSE and WM_QUIT before termination fallback; hook tests capture all
 documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
-Rotate/Pre/Post and verify the configured working directory. Remaining
+Rotate/Pre/Post and verify the configured working directory. A service launch
+integration test also copies the child fixture under a Unicode executable path,
+passes Unicode arguments containing spaces, quotes, trailing backslashes, and an
+empty argument, then checks the child's exact received argument list. Remaining
 acceptance scope includes hook ABI context parity for Power events, event-log compatibility
 beyond events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, and 1020,
 broader error-path coverage, and command-by-command parity against the pinned
