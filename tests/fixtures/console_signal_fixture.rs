@@ -30,6 +30,39 @@ fn main() {
         .expect("write captured arguments");
         return;
     }
+    if arguments
+        .first()
+        .is_some_and(|mode| mode == "capture-process-info")
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetPriorityClass, GetProcessAffinityMask,
+        };
+
+        let output = arguments
+            .get(1)
+            .expect("process information capture path configured");
+        thread::sleep(Duration::from_millis(100));
+        let mut process_affinity = 0usize;
+        let mut system_affinity = 0usize;
+        assert_ne!(
+            unsafe {
+                GetProcessAffinityMask(
+                    GetCurrentProcess(),
+                    &mut process_affinity,
+                    &mut system_affinity,
+                )
+            },
+            0,
+            "process affinity can be queried"
+        );
+        let priority = unsafe { GetPriorityClass(GetCurrentProcess()) };
+        std::fs::write(
+            output,
+            format!("{priority}\n{process_affinity:x}\n{system_affinity:x}"),
+        )
+        .expect("write captured process information");
+        return;
+    }
 
     let marker = std::env::var_os("NSSM_SIGNAL_MARKER").expect("marker configured");
     let started = std::env::var_os("NSSM_STARTED_MARKER").expect("startup marker configured");

@@ -1106,6 +1106,83 @@ fn launches_unicode_application_path_and_preserves_windows_arguments() {
 }
 
 #[test]
+fn applies_configured_priority_and_cpu_affinity_to_child_process() {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let mut process_affinity = 0usize;
+    let mut system_affinity = 0usize;
+    assert_ne!(
+        unsafe {
+            GetProcessAffinityMask(
+                GetCurrentProcess(),
+                &mut process_affinity,
+                &mut system_affinity,
+            )
+        },
+        0,
+        "test runner affinity is queryable"
+    );
+    let cpu = system_affinity.trailing_zeros();
+    let affinity = 1usize << cpu;
+    let capture_path = std::env::temp_dir().join(format!("{service}_process_info.txt"));
+    let capture_path = capture_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![capture_path.clone()]);
+    let fixture = std::env::var_os("NSSM_R_TEST_FIXTURE")
+        .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
+        .expect("console signal fixture is built");
+    let fixture = fixture.to_string_lossy().into_owned();
+    assert!(
+        cli(&["install", &service, &fixture]).status.success(),
+        "fixture service installs"
+    );
+    let parameters = format!(
+        "capture-process-info {}",
+        nssm_r::quote_windows_arg(&capture_path)
+    );
+    assert!(
+        cli(&["set", &service, "AppParameters", &parameters])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&[
+            "set",
+            &service,
+            "AppPriority",
+            "BELOW_NORMAL_PRIORITY_CLASS"
+        ])
+        .status
+        .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppAffinity", &cpu.to_string()])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+    assert!(cli(&["start", &service]).status.success());
+    assert!(
+        wait_for_service_state(&service, "SERVICE_STOPPED"),
+        "service did not stop after process information was captured"
+    );
+
+    let captured = std::fs::read_to_string(&capture_path)
+        .expect("child process reports effective priority and affinity");
+    let mut fields = captured.lines();
+    assert_eq!(fields.next(), Some("16384"));
+    let actual_affinity = usize::from_str_radix(fields.next().unwrap(), 16).unwrap();
+    let child_system_affinity = usize::from_str_radix(fields.next().unwrap(), 16).unwrap();
+    assert_eq!(actual_affinity, affinity);
+    assert_eq!(child_system_affinity & affinity, affinity);
+}
+
+#[test]
 fn timestamp_log_prefixes_each_child_output_line_in_utc() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
