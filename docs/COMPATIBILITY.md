@@ -178,8 +178,8 @@ that configured priority class and CPU affinity are effective at runtime. The
 SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
 acceptance scope includes system-level Power event delivery and end-to-end hook
-ABI propagation; Windows verification of events 1005, 1024, 1025, 1026, 1044,
-1050 and 1081; and event-log compatibility
+ABI propagation; Windows verification of events 1024, 1025, 1026, 1044 and
+1050; and event-log compatibility
 beyond events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1020, 1021, 1034,
 1035, 1040, 1041, 1072 and 1077,
 broader error-path coverage, and command-by-command parity against the pinned
@@ -192,7 +192,9 @@ retains the original Suicide action and event 1021 explains the graceful fallbac
 Do not call this a complete NSSM replacement or publish a stable release until
 each acceptance row has evidence.
 
-The read-only Windows reference sweep now checks all 39 managed setting names
+The service-main unit test invokes `RegisterServiceCtrlHandlerExW` outside an
+SCM dispatcher, producing the real Windows registration failure and verifying
+event 1005 in the Application log. The read-only Windows reference sweep now checks all 39 managed setting names
 against a native service and compares the exact stdout/stderr bytes and exit
 status. Across 68 safe invocations, it caught and resolved the extra carriage
 return NSSM emits for managed-setting rejection, the missing-subparameter
@@ -213,9 +215,9 @@ report events 1081 and 1080 respectively; a Windows SCM scenario verifies a
 missing Start/Pre executable does not abort service startup. A second Windows
 SCM scenario denies SYSTEM read access to the isolated Start hook registry key
 and verifies event 1081 without aborting startup. The elevated local Windows
-run on 2026-10-15 passed the 1007, 1049/1051/1006, 1080/1081, 1029/1030,
+run on 2026-10-15 passed the 1005, 1007, 1049/1051/1006, 1080/1081, 1029/1030,
 1063, and identical stdout/stderr scenarios. OS-level failure injection for
-events 1005, 1024/1025/1026/1044, and 1050 remains unverified.
+events 1024/1025/1026/1044 and 1050 remains unverified.
 
 Missing `AppParameters` now logs warning 1029 and uses an empty argument list.
 Missing or empty `AppDirectory` logs warning 1030 and falls back to the

@@ -5347,11 +5347,11 @@ mod tests {
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
         EVENT_SERVICE_CONTROL_UNKNOWN, HookAbiContext, PBT_APMPOWERSTATUSCHANGE,
         PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CONTROL_PAUSE,
-        elevation_arguments, elevation_parameters, hook_abi_environment, hook_deadline_ms,
-        hook_exit_code, hook_trigger, parse_u32, power_hook_action, power_hook_invocation,
-        priority_name, priority_value, process_belongs_to_service_lifetime,
-        process_open_error_output, quote_dump_arg, service_control_event, service_type_name,
-        valid_hook,
+        elevation_arguments, elevation_parameters, ensure_event_source, hook_abi_environment,
+        hook_deadline_ms, hook_exit_code, hook_trigger, parse_u32, power_hook_action,
+        power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
+        process_open_error_output, quote_dump_arg, service_control_event, service_main,
+        service_type_name, valid_hook, wide,
     };
 
     struct TestDirectory(std::path::PathBuf);
@@ -5474,6 +5474,51 @@ mod tests {
         assert!(output.starts_with("Spooler: 5280: "));
         assert!(!output.contains("(os error 5)"));
         assert!(output.ends_with("\r\r\n\r\n"));
+    }
+
+    #[test]
+    fn service_main_reports_event_1005_when_handler_registration_fails() {
+        ensure_event_source().expect("test runner can register the NSSM event source");
+        let service_name = format!(
+            "NssmRsHandlerFailure{}{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time is after the Unix epoch")
+                .as_millis()
+        );
+        let name = wide(std::ffi::OsStr::new(&service_name));
+        let mut name_pointer = name.as_ptr() as *mut u16;
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+        let latest_event = "$event = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='nssm'; Id=1005} -MaxEvents 1 -ErrorAction SilentlyContinue | Select-Object -First 1; if ($event) { [Console]::Write($event.RecordId) } else { [Console]::Write('0') }";
+        let previous_record = std::process::Command::new(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", latest_event])
+            .output()
+            .expect("query the latest event record");
+        assert!(previous_record.status.success());
+        let previous_record = String::from_utf8_lossy(&previous_record.stdout)
+            .trim()
+            .parse::<u64>()
+            .expect("PowerShell returns the prior event record number");
+
+        unsafe { service_main(1, &mut name_pointer) };
+
+        let script = format!(
+            "$event = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1005}} -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object {{ $_.RecordId -gt {previous_record} -and $_.Message.Contains('RegisterServiceCtrlHandlerEx() failed') }} | Select-Object -First 1; if ($event) {{ exit 0 }}; exit 1"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if std::process::Command::new(&powershell)
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        panic!("Application log contains event 1005 for handler registration failure");
     }
 
     #[test]
