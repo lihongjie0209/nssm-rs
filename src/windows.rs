@@ -2662,6 +2662,7 @@ fn remove(name: &str, confirmed: bool) -> Result<(), String> {
     if unsafe { DeleteService(service.0) } == 0 {
         return Err(io::Error::last_os_error().to_string());
     }
+    cli_println!("Service \"{name}\" removed successfully!\r");
     Ok(())
 }
 
@@ -3156,7 +3157,7 @@ fn install(name: &str, application: Option<&str>, args: &[String]) -> Result<(),
         return Err(error);
     }
     enable_recovery_for_non_crash_failures(service.0, name);
-    cli_println!("Installed service '{name}'.\r");
+    cli_println!("Service \"{name}\" installed successfully!\r");
     Ok(())
 }
 

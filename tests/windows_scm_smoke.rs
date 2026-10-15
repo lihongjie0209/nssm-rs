@@ -83,6 +83,11 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
         "install failed: {}",
         String::from_utf8_lossy(&installed.stderr)
     );
+    assert_eq!(
+        installed.stdout,
+        format!("Service \"{service}\" installed successfully!\r\n").as_bytes()
+    );
+    assert!(installed.stderr.is_empty());
     let application = cli(&["get", &service, "Application"]);
     assert!(application.status.success());
     assert_eq!(String::from_utf8_lossy(&application.stdout).trim(), ping);
@@ -143,6 +148,10 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
         removed.status.success(),
         "remove failed: {}",
         String::from_utf8_lossy(&removed.stderr)
+    );
+    assert_eq!(
+        removed.stdout,
+        format!("Service \"{service}\" removed successfully!\r\n").as_bytes()
     );
     let mut disappeared = false;
     for _ in 0..100 {
