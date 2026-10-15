@@ -3646,7 +3646,34 @@ pub fn run_service(name: &str) -> Result<(), String> {
     }
 }
 
-pub fn execute(command: Command) -> Result<(), String> {
+fn status_code(name: &str) -> Result<u8, String> {
+    let handle = match open_service(name, SERVICE_QUERY_STATUS) {
+        Ok(handle) => handle,
+        Err(error) => {
+            eprintln!("{name}: {error}");
+            return Ok(0);
+        }
+    };
+    let current_state = match state(handle.0) {
+        Ok(current_state) => current_state,
+        Err(error) => {
+            eprintln!("{name}: {error}");
+            return Ok(0);
+        }
+    };
+    println!("{}", state_name(current_state));
+    Ok(current_state.min(u8::MAX as u32) as u8)
+}
+
+pub fn execute(command: Command) -> Result<u8, String> {
+    if let Command::StatusCode(name) = command {
+        return status_code(&name);
+    }
+
+    execute_service_command(command).map(|()| 0)
+}
+
+fn execute_service_command(command: Command) -> Result<(), String> {
     let _ = ensure_event_source();
     match command {
         Command::Install {
@@ -3668,11 +3695,7 @@ pub fn execute(command: Command) -> Result<(), String> {
             println!("{}", state_name(s));
             Ok(())
         }
-        Command::StatusCode(name) => {
-            let s = state(open_service(&name, SERVICE_QUERY_STATUS)?.0)?;
-            println!("{s}");
-            Ok(())
-        }
+        Command::StatusCode(name) => status_code(&name).map(|_| ()),
         Command::Remove { service, confirm } => remove(&service, confirm),
         Command::Get {
             service,

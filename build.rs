@@ -9,10 +9,10 @@ use std::{
 };
 
 fn find_tool(name: &str, override_name: &str, alternate: &[&str]) -> Option<PathBuf> {
-    if let Some(path) = env::var_os(override_name).map(PathBuf::from) {
-        if path.is_file() {
-            return Some(path);
-        }
+    if let Some(path) = env::var_os(override_name).map(PathBuf::from)
+        && path.is_file()
+    {
+        return Some(path);
     }
     let names = std::iter::once(name).chain(alternate.iter().copied());
     for directory in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
@@ -23,17 +23,16 @@ fn find_tool(name: &str, override_name: &str, alternate: &[&str]) -> Option<Path
         }
     }
 
-    if cfg!(windows) {
-        if let Some(program_files) = env::var_os("ProgramFiles(x86)") {
-            let sdk_bin = Path::new(&program_files).join("Windows Kits/10/bin");
-            if let Ok(versions) = std::fs::read_dir(sdk_bin) {
-                for version in versions.flatten() {
-                    for architecture in ["x64", "x86"] {
-                        let candidate = version.path().join(architecture).join(name);
-                        if candidate.is_file() {
-                            return Some(candidate);
-                        }
-                    }
+    if cfg!(windows)
+        && let Some(program_files) = env::var_os("ProgramFiles(x86)")
+        && let Ok(versions) =
+            std::fs::read_dir(Path::new(&program_files).join("Windows Kits/10/bin"))
+    {
+        for version in versions.flatten() {
+            for architecture in ["x64", "x86"] {
+                let candidate = version.path().join(architecture).join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
                 }
             }
         }

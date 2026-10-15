@@ -3,15 +3,15 @@ use std::process::ExitCode;
 
 const USAGE: &str = "nssm-r: Windows service wrapper\n\nUsage: nssm-r <command> [arguments]\n\nCommands: install, remove, start, stop, restart, pause, continue, status, statuscode, get, set, reset, unset, rotate, list, dump, processes, help, version\n";
 
-fn run(args: &[String]) -> Result<(), String> {
+fn run(args: &[String]) -> Result<u8, String> {
     match parse_args(args).map_err(|e| e.to_string())? {
         Command::Help => {
             print!("{USAGE}");
-            Ok(())
+            Ok(0)
         }
         Command::Version => {
             println!("nssm-r {VERSION}");
-            Ok(())
+            Ok(0)
         }
         command => {
             #[cfg(not(windows))]
@@ -47,7 +47,7 @@ fn main() -> ExitCode {
         }
     }
     match run(&args) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("nssm-r: {e}");
             ExitCode::FAILURE
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
 #[cfg(windows)]
 mod windows_backend {
     use nssm_r::Command;
-    pub fn execute(command: Command) -> Result<(), String> {
+    pub fn execute(command: Command) -> Result<u8, String> {
         crate::windows::execute(command)
     }
 }

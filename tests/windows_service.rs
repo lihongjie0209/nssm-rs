@@ -152,6 +152,11 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     let ping =
         std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()) + "\\System32\\PING.EXE";
 
+    let missing_status = cli(&["statuscode", &service]);
+    assert_eq!(missing_status.status.code(), Some(0));
+    assert!(missing_status.stdout.is_empty());
+    assert!(!missing_status.stderr.is_empty());
+
     let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
     assert!(
         installed.status.success(),
@@ -383,6 +388,13 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     }
     assert!(running, "SCM never reported the wrapper as running");
 
+    let status_code = cli(&["statuscode", &service]);
+    assert_eq!(status_code.status.code(), Some(4));
+    assert_eq!(
+        String::from_utf8_lossy(&status_code.stdout).trim(),
+        "SERVICE_RUNNING"
+    );
+
     let tree = cli(&["processes", &service]);
     assert!(
         tree.status.success(),
@@ -409,6 +421,12 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     assert!(status.status.success());
     assert_eq!(
         String::from_utf8_lossy(&status.stdout).trim(),
+        "SERVICE_STOPPED"
+    );
+    let status_code = cli(&["statuscode", &service]);
+    assert_eq!(status_code.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&status_code.stdout).trim(),
         "SERVICE_STOPPED"
     );
 

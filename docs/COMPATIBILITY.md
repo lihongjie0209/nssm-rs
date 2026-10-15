@@ -80,8 +80,9 @@ Required command set: `install`, `remove`, `start`, `stop`, `restart`, `pause`,
 `list`, `dump`, `processes`. `edit` is excluded because it is a GUI workflow.
 `list all` includes services not managed by NSSM where upstream does so. `dump`
 must emit valid, safely quoted command lines that can recreate the configuration.
-`status` reports a symbolic `SERVICE_*` state and success/failure exit status;
-`statuscode` reports the numeric SCM state and returns nonzero on query failure.
+`status` reports a symbolic `SERVICE_*` state and exits successfully when the
+query succeeds. `statuscode` prints the same symbolic state and returns the
+numeric SCM state as its process exit code; query failure returns zero.
 
 ## Test plan
 

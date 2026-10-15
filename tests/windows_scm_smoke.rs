@@ -71,8 +71,11 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
         "service never reached SERVICE_RUNNING"
     );
     let status_code = cli(&["statuscode", &service]);
-    assert!(status_code.status.success());
-    assert_eq!(String::from_utf8_lossy(&status_code.stdout).trim(), "4");
+    assert_eq!(status_code.status.code(), Some(4));
+    assert_eq!(
+        String::from_utf8_lossy(&status_code.stdout).trim(),
+        "SERVICE_RUNNING"
+    );
 
     let processes = cli(&["processes", &service]);
     assert!(processes.status.success());
