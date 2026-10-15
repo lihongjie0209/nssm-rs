@@ -2531,6 +2531,52 @@ fn invalid_stop_method_skip_type_logs_event_and_keeps_all_stop_methods() {
 }
 
 #[test]
+fn short_non_dword_stop_skip_value_uses_the_successfully_read_data() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    assert!(
+        cli(&["install", &service, &command_prompt, "/c", "exit 0"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+
+    let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
+    let write_short_string = format!(
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppStopMethodSkip -PropertyType String -Value '' -Force"
+    );
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    assert!(
+        Command::new(&powershell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &write_short_string
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+    );
+
+    let _ = cli(&["start", &service]);
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    let escaped_service = service.replace('\'', "''");
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1052}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{escaped_service}') {{ exit 1 }} }}; exit 0"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "successful short registry read does not trigger event 1052"
+    );
+}
+
+#[test]
 fn invalid_stop_grace_period_type_uses_default_and_logs_event() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());

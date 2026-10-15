@@ -3411,29 +3411,21 @@ fn read_stop_method_skip(service: &str) -> u32 {
     if code == 2 {
         return 0;
     }
-    if kind != REG_DWORD {
-        report_event(
-            windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
-            EVENT_BOGUS_STOP_METHOD_SKIP,
-            &[service, "AppStopMethodSkip", "NSSM"],
-        );
-        return 0;
-    }
     if code != 0 {
-        let error = registry_error(code);
-        report_event(
-            EVENTLOG_ERROR_TYPE,
-            EVENT_QUERYVALUE_FAILED,
-            &["AppStopMethodSkip", &error],
-        );
-        return 0;
-    }
-    if bytes != std::mem::size_of::<u32>() as u32 {
-        report_event(
-            windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
-            EVENT_BOGUS_STOP_METHOD_SKIP,
-            &[service, "AppStopMethodSkip", "NSSM"],
-        );
+        if kind != REG_DWORD {
+            report_event(
+                windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                EVENT_BOGUS_STOP_METHOD_SKIP,
+                &[service, "AppStopMethodSkip", "NSSM"],
+            );
+        } else {
+            let error = registry_error(code);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_QUERYVALUE_FAILED,
+                &["AppStopMethodSkip", &error],
+            );
+        }
         return 0;
     }
     data
