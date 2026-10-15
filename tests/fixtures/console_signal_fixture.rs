@@ -88,7 +88,10 @@ fn main() {
             std::fs::write(marker, b"thread-quit").expect("write thread quit marker");
             return;
         }
-        Some("window") => run_window_mode(marker, started),
+        Some("window") => run_window_mode(marker, started, std::time::Duration::ZERO),
+        Some("window-delay") => {
+            run_window_mode(marker, started, std::time::Duration::from_secs(23))
+        }
         _ => {}
     }
     assert_ne!(unsafe { SetConsoleCtrlHandler(Some(handler), 1) }, 0);
@@ -109,8 +112,12 @@ fn main() {
 }
 
 #[cfg(windows)]
-fn run_window_mode(marker: std::ffi::OsString, started: std::ffi::OsString) -> ! {
-    use std::sync::OnceLock;
+fn run_window_mode(
+    marker: std::ffi::OsString,
+    started: std::ffi::OsString,
+    close_delay: std::time::Duration,
+) -> ! {
+    use std::{sync::OnceLock, thread};
     use windows_sys::Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
@@ -123,6 +130,7 @@ fn run_window_mode(marker: std::ffi::OsString, started: std::ffi::OsString) -> !
 
     static MARKER: OnceLock<std::ffi::OsString> = OnceLock::new();
     static STARTED: OnceLock<std::ffi::OsString> = OnceLock::new();
+    static CLOSE_DELAY: OnceLock<std::time::Duration> = OnceLock::new();
     unsafe extern "system" fn window_proc(
         window: HWND,
         message: u32,
@@ -138,6 +146,11 @@ fn run_window_mode(marker: std::ffi::OsString, started: std::ffi::OsString) -> !
             if let Some(marker) = MARKER.get() {
                 let _ = std::fs::write(marker, b"window-close");
             }
+            if let Some(delay) = CLOSE_DELAY.get()
+                && !delay.is_zero()
+            {
+                thread::sleep(*delay);
+            }
             unsafe { PostQuitMessage(0) };
             0
         } else {
@@ -147,6 +160,7 @@ fn run_window_mode(marker: std::ffi::OsString, started: std::ffi::OsString) -> !
 
     let _ = MARKER.set(marker);
     let _ = STARTED.set(started);
+    let _ = CLOSE_DELAY.set(close_delay);
     let instance = unsafe { GetModuleHandleW(std::ptr::null()) } as HINSTANCE;
     let class_name = wide("NssmRShutdownFixtureWindow");
     let window_class = WNDCLASSW {

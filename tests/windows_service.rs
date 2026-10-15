@@ -184,6 +184,33 @@ fn recovery_flag_includes_non_crash_failures(service: &str) -> bool {
     enabled
 }
 
+fn service_status_snapshot(
+    service: &str,
+) -> Option<windows_sys::Win32::System::Services::SERVICE_STATUS> {
+    use windows_sys::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT,
+        SERVICE_QUERY_STATUS,
+    };
+
+    let manager = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        return None;
+    }
+    let name: Vec<u16> = service.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe { OpenServiceW(manager, name.as_ptr(), SERVICE_QUERY_STATUS) };
+    if handle.is_null() {
+        unsafe { CloseServiceHandle(manager) };
+        return None;
+    }
+    let mut status = std::mem::MaybeUninit::uninit();
+    let queried = unsafe { QueryServiceStatus(handle, status.as_mut_ptr()) } != 0;
+    unsafe {
+        CloseServiceHandle(handle);
+        CloseServiceHandle(manager);
+    }
+    queried.then(|| unsafe { status.assume_init() })
+}
+
 fn wait_for_service_state(service: &str, expected: &str) -> bool {
     for _ in 0..100 {
         let status = cli(&["status", service]);
@@ -1118,6 +1145,85 @@ fn sends_thread_quit_to_child_before_termination_fallback() {
 #[test]
 fn sends_window_close_to_child_before_termination_fallback() {
     verify_service_shutdown_signal(&["window"], "5", "window-close");
+}
+
+#[test]
+fn long_stop_wait_updates_status_and_logs_event_1078() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let fixture = std::env::var_os("NSSM_RS_TEST_FIXTURE")
+        .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
+        .expect("Cargo builds the window shutdown fixture")
+        .to_string_lossy()
+        .into_owned();
+    let marker = std::env::temp_dir().join(format!("{service}_delayed_window.txt"));
+    let started_marker = std::env::temp_dir().join(format!("{service}_delayed_window.started"));
+    let marker = marker.to_string_lossy().into_owned();
+    let started_marker = started_marker.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![marker.clone(), started_marker.clone()]);
+
+    let installed = cli(&["install", &service, &fixture, "window-delay"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    for (key, value) in [
+        ("NSSM_SIGNAL_MARKER", marker.as_str()),
+        ("NSSM_STARTED_MARKER", started_marker.as_str()),
+    ] {
+        assert!(
+            cli(&["set", &service, "Environment", &format!("+{key}={value}")])
+                .status
+                .success()
+        );
+    }
+    assert!(
+        cli(&["set", &service, "AppStopMethodSkip", "5"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppStopMethodWindow", "24000"])
+            .status
+            .success()
+    );
+    assert!(cli(&["start", &service]).status.success());
+    let start_deadline = Instant::now() + Duration::from_secs(10);
+    while !std::path::Path::new(&started_marker).exists() && Instant::now() < start_deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(std::path::Path::new(&started_marker).exists());
+
+    assert!(cli(&["stop", &service]).status.success());
+    let progress_deadline = Instant::now() + Duration::from_secs(5);
+    let mut checkpoint = 0;
+    while Instant::now() < progress_deadline {
+        if let Some(status) = service_status_snapshot(&service)
+            && status.dwCurrentState == windows_sys::Win32::System::Services::SERVICE_STOP_PENDING
+        {
+            checkpoint = status.dwCheckPoint;
+            if checkpoint > 0 {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(checkpoint > 0, "long stop wait advances the SCM checkpoint");
+    let stop_deadline = Instant::now() + Duration::from_secs(30);
+    while !wait_for_service_state(&service, "SERVICE_STOPPED") && Instant::now() < stop_deadline {
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "window-close");
+
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1078}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ $p = $event.Properties; if ($p.Count -eq 5 -and $p[0].Value -eq 'kill_process()' -and $p[1].Value -eq '{service}' -and $p[2].Value -eq 20000 -and $p[3].Value -eq 4000 -and $p[4].Value -eq 24000) {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "event 1078 reports the function, service, elapsed time, interval and timeout"
+    );
 }
 
 #[test]

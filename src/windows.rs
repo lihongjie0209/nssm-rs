@@ -81,6 +81,7 @@ const EVENT_RESET_THROTTLE: u32 = 0x4000_040b;
 const EVENT_THROTTLED: u32 = 0x8000_040a;
 const EVENT_RESTART_DELAY: u32 = 0x4000_0430;
 const EVENT_ROTATED: u32 = 0x4000_0435;
+const EVENT_AWAITING_SINGLE_HANDLE: u32 = 0x4000_0436;
 const EVENT_HOOK_CREATEPROCESS_FAILED: u32 = 0xc000_0438;
 const EVENT_GET_HOOK_FAILED: u32 = 0xc000_0439;
 const EVENT_NO_FLAGS: u32 = 0x8000_0405;
@@ -225,6 +226,8 @@ macro_rules! cli_eprintln {
 
 static SERVICE_STATUS_HANDLE_VALUE: AtomicIsize = AtomicIsize::new(0);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+static STOP_WAIT_CHECKPOINT: AtomicU32 = AtomicU32::new(0);
+static STOP_WAIT_HINT: AtomicU32 = AtomicU32::new(10_000);
 static ROTATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_ENABLED: AtomicBool = AtomicBool::new(false);
 static CONTINUE_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -3705,16 +3708,58 @@ fn send_thread_quit(process_id: u32) {
     unsafe { CloseHandle(snapshot) };
 }
 
-fn wait_process_for(child: &mut Child, grace: Duration) -> bool {
-    let deadline = Instant::now() + grace;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return true,
-            Err(_) => return true,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
-            Ok(None) => return false,
-        }
+fn update_stop_pending_progress(interval_ms: u32) {
+    let wait_hint = STOP_WAIT_HINT
+        .fetch_add(interval_ms, Ordering::SeqCst)
+        .saturating_add(interval_ms);
+    let checkpoint = STOP_WAIT_CHECKPOINT.fetch_add(1, Ordering::SeqCst) + 1;
+    let handle = SERVICE_STATUS_HANDLE_VALUE.load(Ordering::SeqCst) as SERVICE_STATUS_HANDLE;
+    if handle.is_null() {
+        return;
     }
+    let status = SERVICE_STATUS {
+        dwServiceType: SERVICE_WIN32_OWN_PROCESS,
+        dwCurrentState: SERVICE_STOP_PENDING,
+        dwControlsAccepted: 0,
+        dwWin32ExitCode: NO_ERROR,
+        dwServiceSpecificExitCode: 0,
+        dwCheckPoint: checkpoint,
+        dwWaitHint: wait_hint,
+    };
+    unsafe { SetServiceStatus(handle, &status) };
+}
+
+fn wait_process_for(child: &mut Child, grace: Duration, service: &str, function: &str) -> bool {
+    const STATUS_DEADLINE_MS: u32 = 20_000;
+    let timeout_ms = grace.as_millis().min(u32::MAX as u128) as u32;
+    let mut waited_ms = 0;
+    while waited_ms < timeout_ms {
+        let interval_ms = (timeout_ms - waited_ms).min(STATUS_DEADLINE_MS);
+        update_stop_pending_progress(interval_ms);
+        if waited_ms != 0 {
+            report_event(
+                EVENTLOG_INFORMATION_TYPE,
+                EVENT_AWAITING_SINGLE_HANDLE,
+                &[
+                    function,
+                    service,
+                    &waited_ms.to_string(),
+                    &interval_ms.to_string(),
+                    &timeout_ms.to_string(),
+                ],
+            );
+        }
+        let interval_deadline = Instant::now() + Duration::from_millis(interval_ms as u64);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => return true,
+                Ok(None) if Instant::now() >= interval_deadline => break,
+                Ok(None) => thread::sleep(Duration::from_millis(25)),
+            }
+        }
+        waited_ms += interval_ms;
+    }
+    child.try_wait().map_or(true, |status| status.is_some())
 }
 
 fn report_process_tree_events(service: &str, root: u32, exit_code: u32, report_still_active: bool) {
@@ -3864,15 +3909,32 @@ fn stop_child(
     for method in nssm_rs::stop_methods(skip, no_console) {
         match method {
             StopMethod::Console | StopMethod::Window | StopMethod::Threads => {
-                let (setting, signal) = match method {
-                    StopMethod::Console => ("AppStopMethodConsole", send_console_ctrl_c as fn(u32)),
-                    StopMethod::Window => ("AppStopMethodWindow", send_window_close as fn(u32)),
-                    StopMethod::Threads => ("AppStopMethodThreads", send_thread_quit as fn(u32)),
+                let (setting, signal, function) = match method {
+                    StopMethod::Console => (
+                        "AppStopMethodConsole",
+                        send_console_ctrl_c as fn(u32),
+                        "kill_console()",
+                    ),
+                    StopMethod::Window => (
+                        "AppStopMethodWindow",
+                        send_window_close as fn(u32),
+                        "kill_process()",
+                    ),
+                    StopMethod::Threads => (
+                        "AppStopMethodThreads",
+                        send_thread_quit as fn(u32),
+                        "kill_process()",
+                    ),
                     StopMethod::Terminate => unreachable!(),
                 };
                 signal(pid);
                 let delay = read_reg_dword(service, setting, 1500)?;
-                if wait_process_for(&mut child.child, Duration::from_millis(delay as u64)) {
+                if wait_process_for(
+                    &mut child.child,
+                    Duration::from_millis(delay as u64),
+                    service,
+                    function,
+                ) {
                     return Ok(StopChildOutcome::Exited { tree_events_logged });
                 }
             }
@@ -4409,6 +4471,8 @@ unsafe extern "system" fn service_handler(
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
             report_service_control(&wide_pointer(context.cast()), control, true);
+            STOP_WAIT_CHECKPOINT.store(0, Ordering::SeqCst);
+            STOP_WAIT_HINT.store(10_000, Ordering::SeqCst);
             STOP_REQUESTED.store(true, Ordering::SeqCst);
             set_status(SERVICE_STOP_PENDING, 0, 10_000);
         }
