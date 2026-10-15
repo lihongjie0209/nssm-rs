@@ -2627,6 +2627,23 @@ enum ProcessImageError {
     Times,
 }
 
+#[cfg(test)]
+static FAIL_NEXT_PROCESS_SNAPSHOT: AtomicBool = AtomicBool::new(false);
+
+fn process_snapshot() -> io::Result<HANDLE> {
+    #[cfg(test)]
+    if FAIL_NEXT_PROCESS_SNAPSHOT.swap(false, Ordering::SeqCst) {
+        return Err(io::Error::from_raw_os_error(5));
+    }
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(snapshot)
+    }
+}
+
 fn filetime_value(time: FILETIME) -> u64 {
     (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
 }
@@ -2699,6 +2716,10 @@ fn process_tree(service: &str) -> Result<(), String> {
         return Err(io::Error::last_os_error().to_string());
     }
     let root = status.dwProcessId;
+    process_tree_from_root(service, root)
+}
+
+fn process_tree_from_root(service: &str, root: u32) -> Result<(), String> {
     if root == 0 {
         return Ok(());
     }
@@ -2714,17 +2735,18 @@ fn process_tree(service: &str) -> Result<(), String> {
     let mut service_exit_time = FILETIME::default();
     unsafe { GetSystemTimeAsFileTime(&mut service_exit_time) };
     let service_lifetime = (root_image.creation_time, filetime_value(service_exit_time));
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
-        let error = io::Error::last_os_error();
-        let error_message = windows_error_message(&error);
-        report_event(
-            EVENTLOG_ERROR_TYPE,
-            EVENT_PROCESS_SNAPSHOT_FAILED,
-            &[service, &error_message],
-        );
-        return Err(error.to_string());
-    }
+    let snapshot = match process_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let error_message = windows_error_message(&error);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_PROCESS_SNAPSHOT_FAILED,
+                &[service, &error_message],
+            );
+            return Err(error.to_string());
+        }
+    };
     let mut processes = HashMap::<u32, Vec<ProcessEntry>>::new();
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -5345,15 +5367,15 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 mod tests {
     use super::{
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
-        EVENT_SERVICE_CONTROL_UNKNOWN, HOOK_LAST_APPLICATION_EXIT_CODE, HookAbiContext,
-        PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation,
-        SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT,
-        elevation_arguments, elevation_parameters, ensure_event_source, finish_async_hooks,
-        hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger, install, parse_u32,
-        power_hook_action, power_hook_invocation, priority_name, priority_value,
-        process_belongs_to_service_lifetime, process_open_error_output, quote_dump_arg, remove,
-        service_control_event, service_handler, service_main, service_type_name, set_setting,
-        valid_hook, wide,
+        EVENT_SERVICE_CONTROL_UNKNOWN, FAIL_NEXT_PROCESS_SNAPSHOT, HOOK_LAST_APPLICATION_EXIT_CODE,
+        HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
+        PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTROL_PAUSE,
+        SERVICE_CONTROL_POWEREVENT, elevation_arguments, elevation_parameters, ensure_event_source,
+        finish_async_hooks, hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger,
+        install, parse_u32, power_hook_action, power_hook_invocation, priority_name,
+        priority_value, process_belongs_to_service_lifetime, process_open_error_output,
+        process_tree_from_root, quote_dump_arg, remove, service_control_event, service_handler,
+        service_main, service_type_name, set_setting, valid_hook, wide,
     };
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -5561,6 +5583,51 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         panic!("Application log contains event 1005 for handler registration failure");
+    }
+
+    #[test]
+    fn process_snapshot_failure_reports_event_1024_and_returns_the_windows_error() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .expect("Windows event tests are serialized");
+        ensure_event_source().expect("test runner can register the NSSM event source");
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+        let before = std::process::Command::new(&powershell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$event = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='nssm'; Id=1024} -MaxEvents 1 -ErrorAction SilentlyContinue | Select-Object -First 1; if ($event) { [Console]::Write($event.RecordId) } else { [Console]::Write('0') }",
+            ])
+            .output()
+            .expect("query the latest event record");
+        assert!(before.status.success());
+        let before = String::from_utf8_lossy(&before.stdout)
+            .trim()
+            .parse::<u64>()
+            .expect("PowerShell returns the prior event record number");
+
+        FAIL_NEXT_PROCESS_SNAPSHOT.store(true, Ordering::SeqCst);
+        let error = process_tree_from_root("NssmRsSnapshotFailureTest", std::process::id())
+            .expect_err("injected snapshot failure is returned to the caller");
+        assert!(!error.is_empty());
+
+        let query = format!(
+            "$event = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1024}} -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object {{ $_.RecordId -gt {before} -and $_.Message.Contains('NssmRsSnapshotFailureTest') }} | Select-Object -First 1; if ($event) {{ exit 0 }}; exit 1"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if std::process::Command::new(&powershell)
+                .args(["-NoProfile", "-NonInteractive", "-Command", &query])
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        panic!("Application log contains event 1024 for the injected snapshot failure");
     }
 
     #[test]

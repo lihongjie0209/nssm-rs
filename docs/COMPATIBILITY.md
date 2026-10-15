@@ -180,7 +180,7 @@ that configured priority class and CPU affinity are effective at runtime. The
 SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
 acceptance scope includes system-level Power event delivery; Windows
-verification of events 1024, 1025, 1026, 1044 and
+verification of events 1025, 1026, 1044 and
 1050; and event-log compatibility
 beyond events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1020, 1021, 1034,
 1035, 1040, 1041, 1072 and 1077,
@@ -218,8 +218,10 @@ missing Start/Pre executable does not abort service startup. A second Windows
 SCM scenario denies SYSTEM read access to the isolated Start hook registry key
 and verifies event 1081 without aborting startup. The elevated local Windows
 run on 2026-10-15 passed the 1005, 1007, 1049/1051/1006, 1080/1081, 1029/1030,
-1063, and identical stdout/stderr scenarios. OS-level failure injection for
-events 1024/1025/1026/1044 and 1050 remains unverified.
+1063, and identical stdout/stderr scenarios. A deterministic Windows API failure
+injection now runs the process-tree reporting path and verifies that a new
+Application log event 1024 is written and its Windows error is returned. Failure
+injection for events 1025/1026/1044 and 1050 remains unverified.
 
 Missing `AppParameters` now logs warning 1029 and uses an empty argument list.
 Missing or empty `AppDirectory` logs warning 1030 and falls back to the
