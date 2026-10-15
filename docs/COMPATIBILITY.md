@@ -134,7 +134,9 @@ integration test also copies the child fixture under a Unicode executable path,
 passes Unicode arguments containing spaces, quotes, trailing backslashes, and an
 empty argument, then checks the child's exact received argument list. Another
 service integration test queries the child process after launch and verifies
-that configured priority class and CPU affinity are effective at runtime. Remaining
+that configured priority class and CPU affinity are effective at runtime. The
+SCM lifecycle test also replays every command emitted by `dump` into a second
+service and reads back its application, arguments, and service type. Remaining
 acceptance scope includes hook ABI context parity for Power events, event-log compatibility
 beyond events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, and 1020,
 broader error-path coverage, and command-by-command parity against the pinned

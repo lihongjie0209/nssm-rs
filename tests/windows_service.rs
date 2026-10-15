@@ -271,6 +271,43 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     );
     assert!(dump.contains("set \"NssmR Dump Copy\" AppParameters \"-t 127.0.0.1\""));
     assert!(dump.contains("set \"NssmR Dump Copy\" Type SERVICE_WIN32_OWN_PROCESS"));
+    let copied_service = "NssmR Dump Copy";
+    let _copy_cleanup = Cleanup(copied_service.to_owned());
+    for line in dump.lines() {
+        let parsed = nssm_r::split_windows_args(line);
+        assert!(
+            parsed.len() >= 2,
+            "dump emitted an incomplete command: {line}"
+        );
+        let arguments = parsed
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let replayed = cli(&arguments);
+        assert!(
+            replayed.status.success(),
+            "dump command failed: {line}\nstderr: {}",
+            String::from_utf8_lossy(&replayed.stderr)
+        );
+    }
+    for (setting, expected) in [
+        ("Application", ping.as_str()),
+        ("AppParameters", "-t 127.0.0.1"),
+        ("Type", "SERVICE_WIN32_OWN_PROCESS"),
+    ] {
+        let copied_value = cli(&["get", copied_service, setting]);
+        assert!(
+            copied_value.status.success(),
+            "dumped {setting} could not be read back: {}",
+            String::from_utf8_lossy(&copied_value.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&copied_value.stdout).trim(),
+            expected,
+            "dump did not preserve {setting}"
+        );
+    }
 
     let set_delay = cli(&["set", &service, "AppRestartDelay", "250"]);
     assert!(
