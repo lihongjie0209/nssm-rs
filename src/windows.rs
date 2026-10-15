@@ -39,8 +39,8 @@ use windows_sys::Win32::{
         Threading::*,
     },
     UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, PostThreadMessageW, SMTO_ABORTIFHUNG,
-        SendMessageTimeoutW, WM_CLOSE, WM_QUIT,
+        EnumWindows, GetWindowThreadProcessId, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
+        PostThreadMessageW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_CLOSE, WM_QUIT,
     },
 };
 
@@ -514,6 +514,14 @@ fn valid_hook(event: &str, action: &str) -> bool {
         }
         "stop" => action.eq_ignore_ascii_case("pre"),
         _ => false,
+    }
+}
+
+fn power_hook_action(event_type: u32) -> Option<u32> {
+    match event_type {
+        PBT_APMRESUMEAUTOMATIC => Some(2),   // Power/Resume
+        PBT_APMPOWERSTATUSCHANGE => Some(1), // Power/Change
+        _ => None,
     }
 }
 
@@ -2934,10 +2942,8 @@ unsafe extern "system" fn service_handler(
             ROTATE_REQUESTED.store(true, Ordering::SeqCst);
         }
         SERVICE_CONTROL_POWEREVENT => {
-            let hook = match event_type {
-                18 => 2, // PBT_APMRESUMEAUTOMATIC
-                10 => 1, // PBT_APMPOWERSTATUSCHANGE
-                _ => return NO_ERROR,
+            let Some(hook) = power_hook_action(event_type) else {
+                return NO_ERROR;
             };
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
             POWER_HOOK_REQUESTED.store(hook, Ordering::SeqCst);
@@ -3697,7 +3703,9 @@ pub fn execute(command: Command) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::hook_deadline_ms;
+    use super::{
+        PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, hook_deadline_ms, power_hook_action,
+    };
 
     #[test]
     fn hook_deadlines_match_service_status_and_general_hook_limits() {
@@ -3707,5 +3715,15 @@ mod tests {
         assert_eq!(hook_deadline_ms("Start", "Post"), 60_000);
         assert_eq!(hook_deadline_ms("Exit", "Post"), 60_000);
         assert_eq!(hook_deadline_ms("start", "pre"), 20_000);
+    }
+
+    #[test]
+    fn power_events_map_only_supported_windows_broadcasts_to_hooks() {
+        assert_eq!(power_hook_action(PBT_APMPOWERSTATUSCHANGE), Some(1));
+        assert_eq!(power_hook_action(PBT_APMRESUMEAUTOMATIC), Some(2));
+        assert_eq!(power_hook_action(0), None);
+        assert_eq!(power_hook_action(4), None);
+        assert_eq!(power_hook_action(7), None);
+        assert_eq!(power_hook_action(0xffff), None);
     }
 }
