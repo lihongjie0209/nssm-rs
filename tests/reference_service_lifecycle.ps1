@@ -85,6 +85,25 @@ function Add-ObservedResult([System.Collections.Generic.List[object]] $Results,
     return $result
 }
 
+function Add-NormalizedDumpResult([System.Collections.Generic.List[object]] $Results,
+    [string] $Binary, [string] $Service) {
+    $result = Invoke-Cli $Binary @('dump', $Service)
+    if ($result.ExitCode -ne 0) {
+        $stderr = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($result.Stderr))
+        throw "dump $Service returned $($result.ExitCode): $stderr"
+    }
+    $dump = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($result.Stdout))
+    $binaryPath = [IO.Path]::GetFullPath($Binary)
+    $dump = $dump.Replace($binaryPath, '<NSSM_BINARY>')
+    $normalized = [Convert]::ToBase64String([Text.Encoding]::Default.GetBytes($dump))
+    $Results.Add([pscustomobject]@{
+        Label = 'dump configured service'
+        ExitCode = $result.ExitCode
+        Stdout = $normalized
+        Stderr = $result.Stderr
+    })
+}
+
 function Wait-ServiceState([string] $Binary, [string] $Service, [string] $State) {
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
         $result = Invoke-Cli $Binary @('status', $Service)
@@ -291,6 +310,34 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
         @('set', $Service, 'AppParameters', '-t 127.0.0.1') | Out-Null
     Add-Result $results $Binary 'restore AppDirectory' `
         @('set', $Service, 'AppDirectory', '') | Out-Null
+    foreach ($setting in $dwordSettings) {
+        Add-Result $results $Binary "configure dump $($setting.Name)" `
+            @('set', $Service, $setting.Name, $setting.Value) | Out-Null
+    }
+    Add-Result $results $Binary 'configure dump AppAffinity' `
+        @('set', $Service, 'AppAffinity', '0') | Out-Null
+    Add-Result $results $Binary 'configure dump AppExit' `
+        @('set', $Service, 'AppExit', '23', 'Ignore') | Out-Null
+    Add-Result $results $Binary 'configure dump AppEvents' `
+        @('set', $Service, 'AppEvents', 'Start/Pre', 'cmd.exe /c exit 0') | Out-Null
+    Add-Result $results $Binary 'configure dump AppEnvironmentExtra' `
+        @('set', $Service, 'AppEnvironmentExtra', '+NSSMR_DUMP=value') | Out-Null
+    Add-Result $results $Binary 'configure dump Description' `
+        @('set', $Service, 'Description', 'nssm-rs dump parity') | Out-Null
+    Add-Result $results $Binary 'configure dump DisplayName' `
+        @('set', $Service, 'DisplayName', "$Service dump parity") | Out-Null
+    Add-Result $results $Binary 'configure dump ObjectName' `
+        @('set', $Service, 'ObjectName', 'SYSTEM') | Out-Null
+    Add-NormalizedDumpResult $results $Binary $Service
+    foreach ($setting in $dwordSettings) {
+        Add-Result $results $Binary "restore dump $($setting.Name)" `
+            @('reset', $Service, $setting.Name) | Out-Null
+    }
+    foreach ($setting in @('AppAffinity', 'AppExit', 'AppEvents', 'AppEnvironmentExtra',
+        'Description', 'DisplayName', 'ObjectName')) {
+        Add-Result $results $Binary "restore dump $setting" `
+            @('reset', $Service, $setting) | Out-Null
+    }
     Add-Result $results $Binary 'start' @('start', $Service) | Out-Null
     Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
     Add-Result $results $Binary 'status running' @('status', $Service) | Out-Null
