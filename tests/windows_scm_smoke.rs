@@ -43,6 +43,31 @@ fn wait_for_state(service: &str, expected: &str) -> bool {
     false
 }
 
+fn accepted_service_controls(service: &str) -> Option<u32> {
+    use windows_sys::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT,
+        SERVICE_QUERY_STATUS,
+    };
+
+    let manager = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        return None;
+    }
+    let name: Vec<u16> = service.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe { OpenServiceW(manager, name.as_ptr(), SERVICE_QUERY_STATUS) };
+    if handle.is_null() {
+        unsafe { CloseServiceHandle(manager) };
+        return None;
+    }
+    let mut status = std::mem::MaybeUninit::uninit();
+    let queried = unsafe { QueryServiceStatus(handle, status.as_mut_ptr()) } != 0;
+    unsafe {
+        CloseServiceHandle(handle);
+        CloseServiceHandle(manager);
+    }
+    queried.then(|| unsafe { status.assume_init().dwControlsAccepted })
+}
+
 #[test]
 fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
     let service = service_name();
@@ -69,6 +94,13 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
     assert!(
         wait_for_state(&service, "SERVICE_RUNNING"),
         "service never reached SERVICE_RUNNING"
+    );
+    let accepted_controls =
+        accepted_service_controls(&service).expect("SCM returns the running service status");
+    assert_ne!(
+        accepted_controls & windows_sys::Win32::System::Services::SERVICE_ACCEPT_POWEREVENT,
+        0,
+        "running service registers for power broadcast controls"
     );
     let status_code = cli(&["statuscode", &service]);
     assert_eq!(status_code.status.code(), Some(4));

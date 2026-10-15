@@ -169,7 +169,9 @@ mapping used by Power hooks, including the last application exit code when a
 Power event arrives between child processes. Windows `ControlService` does not expose
 `SERVICE_CONTROL_POWEREVENT` as a caller-sendable control, so injecting a real
 power broadcast into a service still requires an OS power event; actual system
-delivery remains unverified. A Windows test invokes the SCM callback for a
+delivery remains unverified. The real SCM lifecycle smoke test now queries
+`dwControlsAccepted` while the service is running and asserts that
+`SERVICE_ACCEPT_POWEREVENT` is registered. A Windows test invokes the SCM callback for a
 Resume event, launches the configured asynchronous hook, and checks the
 `NSSM_EVENT`, `NSSM_ACTION`, `NSSM_TRIGGER`, `NSSM_LAST_CONTROL` and
 `NSSM_EXITCODE` values received by the child. A service launch
