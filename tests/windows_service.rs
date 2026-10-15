@@ -182,6 +182,37 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     );
     assert!(cli(&["reset", &service, "Description"]).status.success());
 
+    let object_name = cli(&["set", &service, "ObjectName", "SYSTEM"]);
+    assert!(
+        object_name.status.success(),
+        "setting the built-in service account failed: {}",
+        String::from_utf8_lossy(&object_name.stderr)
+    );
+    let object_name = cli(&["get", &service, "ObjectName"]);
+    assert!(object_name.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&object_name.stdout).trim(),
+        "LocalSystem"
+    );
+
+    let start_type = cli(&["set", &service, "Start", "SERVICE_DEMAND_START"]);
+    assert!(
+        start_type.status.success(),
+        "setting demand start failed: {}",
+        String::from_utf8_lossy(&start_type.stderr)
+    );
+    let start_type = cli(&["get", &service, "Start"]);
+    assert!(start_type.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&start_type.stdout).trim(),
+        "SERVICE_DEMAND_START"
+    );
+    assert!(
+        cli(&["set", &service, "Start", "SERVICE_AUTO_START"])
+            .status
+            .success()
+    );
+
     let invalid_start = cli(&["set", &service, "Start", "NOT_A_START_TYPE"]);
     assert_eq!(invalid_start.status.code(), Some(6));
     assert!(invalid_start.stdout.is_empty());
