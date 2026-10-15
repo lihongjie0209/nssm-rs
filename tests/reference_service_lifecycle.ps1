@@ -207,15 +207,21 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
             throw "invalid set $($setting.Name) changed the stored value"
         }
     }
-    foreach ($setting in @(
-        @{ Name = 'Name'; Value = 'NssmRChangedName' },
-        @{ Name = 'ImagePath'; Value = 'C:\NssmRChangedImage.exe' }
-    )) {
-        $result = Add-ObservedResult $results $Binary "reject set $($setting.Name)" `
-            @('set', $Service, $setting.Name, $setting.Value)
-        if ($result.ExitCode -eq 0) {
-            throw "set $($setting.Name) unexpectedly succeeded"
-        }
+    $result = Add-ObservedResult $results $Binary 'reject set Name' `
+        @('set', $Service, 'Name', 'NssmRChangedName')
+    if ($result.ExitCode -eq 0) {
+        throw 'set Name unexpectedly succeeded'
+    }
+    $imagePath = Add-Result $results $Binary 'get ImagePath before native update' `
+        @('get', $Service, 'ImagePath')
+    $imagePathValue = [Text.Encoding]::Default.GetString(
+        [Convert]::FromBase64String($imagePath.Stdout)).Trim()
+    Add-Result $results $Binary 'set ImagePath to current value' `
+        @('set', $Service, 'ImagePath', $imagePathValue) | Out-Null
+    $imagePathAfterSet = Add-Result $results $Binary 'get ImagePath after native update' `
+        @('get', $Service, 'ImagePath')
+    if ($imagePath.Stdout -cne $imagePathAfterSet.Stdout) {
+        throw 'setting ImagePath to its current value changed the service image path'
     }
     $temporary = $env:TEMP
     foreach ($setting in @(

@@ -36,7 +36,7 @@ interface and Windows service behavior. GUI workflows are explicitly excluded.
 | Restart policy | Exit-code-specific/default `Restart`, `Ignore`, `Exit`, `Suicide`; throttle and restart delay; reset throttle after long-running success | Deterministic child fixtures exit with chosen codes and delays; assert restart counts, timing bounds, Ignore/Exit service states, and Suicide's abnormal SCM termination |
 | Log rotation | `AppRotateFiles`, `AppRotateOnline`, `AppRotateSeconds`, low/high byte thresholds, delay, timestamping; `rotate <name>` | Boundary-size/age tests, active-file and naming assertions, integration for online rotation |
 | Environment | App environment overrides, extra environment, system/service merged environment; ordered KEY=VALUE edits and case-insensitive keys; `+`, `-`, `:` modifiers and optional single-key query | Unit tests for ordering, replacement, conditional delete, clear/reset, malformed blocks and expansion; child sees expected environment |
-| Service metadata | `Description`, `DisplayName`, `ObjectName`, `Start`, `Type`, `DependOnGroup`, `DependOnService`, `ImagePath`, `Name` | Native SCM readback, accepted enum validation, account/dependency error handling |
+| Service metadata | `Description`, `DisplayName`, `ObjectName`, `Start`, `Type`, `DependOnGroup`, `DependOnService`, `ImagePath`, `Name` | Native SCM readback, ImagePath update, Name write rejection, accepted enum validation, account/dependency error handling |
 | Hooks | `AppEvents <event>/<action> <command>` for service/app start, stop, rotate lifecycle and pre/post phases; hook output-handle behavior and all `NSSM_*` ABI variables | Event-order integration assertions for normal start, restart, stop, rotation, failures, and cancellation; assert the full environment ABI on real Start, Exit, Stop and Rotate hooks |
 | Discovery/reporting | `list` and `list all`; `processes <name>`; `dump <name>` and `dump <name> <newname>` | Golden output tests, quoting/escaping round-trip, process tree correctness, native-service filtering |
 | Windows process launch | Correct Windows quoting, Unicode paths/args, environment expansion, priority, CPU affinity, console/window behavior | Launch fixture with argv/environment echo, Unicode and special-character cases, priority/affinity inspection |
@@ -65,7 +65,8 @@ ImagePath, ObjectName, Name, Start, Type
 
 `DependOnGroup`, `DependOnService`, `Description`, `DisplayName`, `Environment`,
 `ImagePath`, `ObjectName`, `Name`, `Start` and `Type` are native SCM/service-key
-settings. `Name` and `ImagePath` are query-only in the reference CLI. Each I/O
+settings. `Name` is query-only in the reference CLI; `ImagePath` can be set
+through SCM. Each I/O
 stream's `ShareMode`, `CreationDisposition` and `FlagsAndAttributes` are separate
 settings formed by appending those suffixes to `AppStdin`, `AppStdout` or
 `AppStderr`.
