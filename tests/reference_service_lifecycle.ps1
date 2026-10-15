@@ -333,8 +333,13 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
         Add-Result $results $Binary "restore dump $($setting.Name)" `
             @('reset', $Service, $setting.Name) | Out-Null
     }
-    foreach ($setting in @('AppAffinity', 'AppExit', 'AppEvents', 'AppEnvironmentExtra',
-        'Description', 'DisplayName', 'ObjectName')) {
+    Add-Result $results $Binary 'restore dump AppAffinity' `
+        @('reset', $Service, 'AppAffinity') | Out-Null
+    Add-Result $results $Binary 'restore dump AppExit' `
+        @('reset', $Service, 'AppExit', '23') | Out-Null
+    Add-Result $results $Binary 'restore dump AppEvents' `
+        @('reset', $Service, 'AppEvents', 'Start/Pre') | Out-Null
+    foreach ($setting in @('AppEnvironmentExtra', 'Description', 'DisplayName', 'ObjectName')) {
         Add-Result $results $Binary "restore dump $setting" `
             @('reset', $Service, $setting) | Out-Null
     }
