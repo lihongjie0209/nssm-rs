@@ -38,9 +38,10 @@ use windows_sys::Win32::{
         Services::*,
         Threading::*,
     },
+    UI::Shell::{IsUserAnAdmin, SHELLEXECUTEINFOW, ShellExecuteExW},
     UI::WindowsAndMessaging::{
         EnumWindows, GetWindowThreadProcessId, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        PostThreadMessageW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_CLOSE, WM_QUIT,
+        PostThreadMessageW, SMTO_ABORTIFHUNG, SW_SHOW, SendMessageTimeoutW, WM_CLOSE, WM_QUIT,
     },
 };
 
@@ -3928,7 +3929,75 @@ fn status_code(name: &str) -> Result<u8, String> {
     Ok(current_state.min(u8::MAX as u32) as u8)
 }
 
+fn is_administrator() -> bool {
+    unsafe { IsUserAnAdmin() != 0 }
+}
+
+fn elevation_arguments(command: &Command) -> Option<Vec<String>> {
+    match command {
+        Command::Install {
+            service,
+            application,
+            args,
+        } => {
+            let mut arguments = vec!["install".to_owned(), service.clone()];
+            if let Some(application) = application {
+                arguments.push(application.clone());
+                arguments.extend(args.iter().cloned());
+            }
+            Some(arguments)
+        }
+        Command::Remove { service, confirm } => {
+            let mut arguments = vec!["remove".to_owned(), service.clone()];
+            if *confirm {
+                arguments.push("confirm".to_owned());
+            }
+            Some(arguments)
+        }
+        _ => None,
+    }
+}
+
+fn elevation_parameters(arguments: &[String]) -> String {
+    arguments
+        .iter()
+        .map(|argument| quote_windows_arg(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn elevate(arguments: &[String]) -> u8 {
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("nssm-rs: unable to locate executable for elevation: {error}");
+            return 100;
+        }
+    };
+    let executable = wide(executable.as_os_str());
+    let verb = wide(OsStr::new("runas"));
+    let parameters = elevation_parameters(arguments);
+    let parameters = wide(OsStr::new(&parameters));
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = executable.as_ptr();
+    info.lpParameters = parameters.as_ptr();
+    info.nShow = SW_SHOW;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        eprintln!("nssm-rs: Windows refused the administrator elevation request");
+        100
+    } else {
+        0
+    }
+}
+
 pub fn execute(command: Command) -> Result<u8, String> {
+    if !is_administrator()
+        && let Some(arguments) = elevation_arguments(&command)
+    {
+        return Ok(elevate(&arguments));
+    }
     match command {
         Command::StatusCode(name) => status_code(&name),
         Command::Set {
@@ -4091,10 +4160,11 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::{
-        EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
+        Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
         EVENT_SERVICE_CONTROL_UNKNOWN, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        PowerHookAction, SERVICE_CONTROL_PAUSE, hook_deadline_ms, parse_u32, power_hook_action,
-        priority_name, priority_value, queue_power_hook, service_control_event, valid_hook,
+        PowerHookAction, SERVICE_CONTROL_PAUSE, elevation_arguments, elevation_parameters,
+        hook_deadline_ms, parse_u32, power_hook_action, priority_name, priority_value,
+        queue_power_hook, service_control_event, valid_hook,
     };
 
     #[test]
@@ -4105,6 +4175,29 @@ mod tests {
         assert_eq!(hook_deadline_ms("Start", "Post"), 60_000);
         assert_eq!(hook_deadline_ms("Exit", "Post"), 60_000);
         assert_eq!(hook_deadline_ms("start", "pre"), 20_000);
+    }
+
+    #[test]
+    fn elevation_rebuilds_install_and_confirmed_remove_arguments_safely() {
+        let install = Command::Install {
+            service: "worker service".into(),
+            application: Some(r"C:\Program Files\worker.exe".into()),
+            args: vec!["--label".into(), "two words".into()],
+        };
+        let install_arguments = elevation_arguments(&install).expect("install requests elevation");
+        assert_eq!(
+            elevation_parameters(&install_arguments),
+            r#"install "worker service" "C:\Program Files\worker.exe" --label "two words""#
+        );
+
+        let remove = Command::Remove {
+            service: "worker service".into(),
+            confirm: true,
+        };
+        let remove_arguments = elevation_arguments(&remove).expect("remove requests elevation");
+        assert_eq!(remove_arguments, ["remove", "worker service", "confirm"]);
+
+        assert!(elevation_arguments(&Command::List { all: false }).is_none());
     }
 
     #[test]
