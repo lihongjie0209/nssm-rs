@@ -165,8 +165,11 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     );
 
     let exit_policy_before_start = cli(&["get", &service, "AppExit", "Default"]);
-    assert_eq!(exit_policy_before_start.status.code(), Some(5));
-    assert!(exit_policy_before_start.stdout.is_empty());
+    assert!(exit_policy_before_start.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&exit_policy_before_start.stdout).trim(),
+        "Restart"
+    );
 
     assert!(
         cli(&["set", &service, "Description", "nssm-rs test service"])
@@ -324,6 +327,13 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
             .is_some_and(|line| line.contains(" install \"NssmR Dump Copy\" "))
     );
     assert!(dump.contains("set \"NssmR Dump Copy\" AppParameters \"-t 127.0.0.1\""));
+    assert!(dump.contains("set \"NssmR Dump Copy\" AppExit Default Restart"));
+    assert!(
+        dump.to_ascii_lowercase()
+            .contains("set \"nssmr dump copy\" appdirectory c:\\windows\\system32")
+    );
+    assert!(dump.contains("set \"NssmR Dump Copy\" DisplayName \"NssmR Dump Copy\""));
+    assert!(dump.contains("set \"NssmR Dump Copy\" ObjectName LocalSystem"));
     assert!(dump.contains("set \"NssmR Dump Copy\" Type SERVICE_WIN32_OWN_PROCESS"));
     let copied_service = "NssmR Dump Copy";
     let _copy_cleanup = Cleanup(copied_service.to_owned());

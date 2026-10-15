@@ -129,6 +129,10 @@ registry, including priority name normalization and each setting's default.
 Non-administrator `install` and `remove` now request UAC elevation while
 preserving command arguments; Windows unit coverage checks safe reconstruction,
 and the full local elevated SCM integration suite passed with this change.
+Install now persists the application directory and `AppExit=Restart` defaults,
+matching NSSM before the first service start. `dump` emits shell-safe commands,
+symbolic priority values and native default metadata; the Windows lifecycle
+integration replays the resulting commands into a second service.
 The SCM lifecycle integration also changes a built-in account alias through
 `ObjectName` and validates `Start` by reading back its real SCM value.
 It exercises service dependencies through replacement, addition, removal and

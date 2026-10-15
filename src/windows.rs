@@ -1347,6 +1347,82 @@ fn dump_set_line(
     dump_set_line_values(executable, service, parameter, additional, &[value]);
 }
 
+fn quote_dump_arg(argument: &str) -> String {
+    let needs_escape = |character| matches!(character, '"' | '&' | '%' | '^' | '<' | '>' | '|');
+    let needs_quote = |character| {
+        matches!(character, ' ' | '\t' | '\n' | '\u{000b}' | '"' | '*') || needs_escape(character)
+    };
+    let mut escaped = false;
+    let mut quoted = false;
+    for character in argument.chars() {
+        if needs_escape(character) {
+            escaped = true;
+            quoted = true;
+            break;
+        }
+        if needs_quote(character) {
+            quoted = true;
+        }
+    }
+    if !quoted {
+        return argument.to_owned();
+    }
+
+    let mut output = String::new();
+    if escaped {
+        output.push('^');
+    }
+    output.push('"');
+    let characters = argument.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < characters.len() {
+        let mut backslashes = 0;
+        while index < characters.len() && characters[index] == '\\' {
+            backslashes += 1;
+            index += 1;
+        }
+        if index == characters.len() {
+            for _ in 0..backslashes * 2 {
+                if escaped {
+                    output.push('^');
+                }
+                output.push('\\');
+            }
+            break;
+        }
+        let character = characters[index];
+        if character == '"' {
+            for _ in 0..backslashes * 2 + 1 {
+                if escaped {
+                    output.push('^');
+                }
+                output.push('\\');
+            }
+            if escaped && needs_escape(character) {
+                output.push('^');
+            }
+            output.push(character);
+        } else {
+            for _ in 0..backslashes {
+                if escaped {
+                    output.push('^');
+                }
+                output.push('\\');
+            }
+            if escaped && needs_escape(character) {
+                output.push('^');
+            }
+            output.push(character);
+        }
+        index += 1;
+    }
+    if escaped {
+        output.push('^');
+    }
+    output.push('"');
+    output
+}
+
 fn dump_set_line_values(
     executable: &str,
     service: &str,
@@ -1355,15 +1431,15 @@ fn dump_set_line_values(
     values: &[&str],
 ) {
     let mut arguments = vec![
-        quote_windows_arg(executable),
+        quote_dump_arg(executable),
         "set".into(),
-        quote_windows_arg(service),
-        quote_windows_arg(parameter),
+        quote_dump_arg(service),
+        quote_dump_arg(parameter),
     ];
     if let Some(additional) = additional {
-        arguments.push(quote_windows_arg(additional));
+        arguments.push(quote_dump_arg(additional));
     }
-    arguments.extend(values.iter().map(|value| quote_windows_arg(value)));
+    arguments.extend(values.iter().map(|value| quote_dump_arg(value)));
     println!("{}\r", arguments.join(" "));
 }
 
@@ -1439,7 +1515,12 @@ fn dump_managed_settings(executable: &str, source: &str, target: &str) -> Result
                     let value = u32::from_le_bytes(
                         bytes.try_into().map_err(|_| "invalid DWORD".to_owned())?,
                     );
-                    dump_set_line(executable, target, spec.name, None, &value.to_string());
+                    let value = if spec.name.eq_ignore_ascii_case("AppPriority") {
+                        priority_name(value)?.to_owned()
+                    } else {
+                        value.to_string()
+                    };
+                    dump_set_line(executable, target, spec.name, None, &value);
                 }
             }
             SettingKind::MultiString => {
@@ -1523,14 +1604,21 @@ fn dump_native_settings(executable: &str, source: &str, target: &str) -> Result<
         dump_set_line(executable, target, "Description", None, &description);
     }
     let display_name = wide_pointer(config.lpDisplayName);
-    if !display_name.is_empty() && !display_name.eq_ignore_ascii_case(source) {
+    let display_name =
+        if !target.eq_ignore_ascii_case(source) && display_name.eq_ignore_ascii_case(source) {
+            target.to_owned()
+        } else {
+            display_name
+        };
+    if !display_name.is_empty() {
         dump_set_line(executable, target, "DisplayName", None, &display_name);
     }
     let account = wide_pointer(config.lpServiceStartName);
-    if !account.eq_ignore_ascii_case("LocalSystem")
-        && !account.eq_ignore_ascii_case("NT AUTHORITY\\SYSTEM")
-    {
-        let password = if account.eq_ignore_ascii_case("NT AUTHORITY\\LocalService")
+    if !account.is_empty() {
+        let password = if account.eq_ignore_ascii_case("LocalSystem")
+            || account.eq_ignore_ascii_case("SYSTEM")
+            || account.eq_ignore_ascii_case("NT AUTHORITY\\SYSTEM")
+            || account.eq_ignore_ascii_case("NT AUTHORITY\\LocalService")
             || account.eq_ignore_ascii_case("NT AUTHORITY\\NetworkService")
             || account.ends_with('$')
         {
@@ -1638,10 +1726,10 @@ fn dump_service(source: &str, target: Option<&str>) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let executable = executable.to_string_lossy();
     let install = vec![
-        quote_windows_arg(&executable),
+        quote_dump_arg(&executable),
         "install".into(),
-        quote_windows_arg(target),
-        quote_windows_arg(&application),
+        quote_dump_arg(target),
+        quote_dump_arg(&application),
     ];
     println!("{}\r", install.join(" "));
     dump_managed_settings(&executable, source, target)?;
@@ -2261,18 +2349,24 @@ fn write_service_config(name: &str, app: &str, args: &[String]) -> Result<(), St
     if code != 0 {
         return Err(registry_error(code));
     }
-    let result = write_reg_string(key, "Application", app).and_then(|_| {
-        let joined = args
-            .iter()
-            .map(|s| quote_windows_arg(s))
-            .collect::<Vec<_>>()
-            .join(" ");
-        write_reg_string(key, "AppParameters", &joined)
-    });
+    let result = write_reg_string(key, "Application", app)
+        .and_then(|_| {
+            let joined = args.join(" ");
+            write_reg_string(key, "AppParameters", &joined)
+        })
+        .and_then(|_| {
+            let directory = Path::new(app)
+                .parent()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            write_reg_string(key, "AppDirectory", &directory)
+        });
     unsafe {
         RegCloseKey(key);
     }
-    result
+    result?;
+    let exit_key = open_registry_key(name, "AppExit", true, KEY_SET_VALUE)?;
+    write_raw_value(exit_key.0, None, REG_SZ, &encode_wide("Restart", 1))
 }
 
 fn install(name: &str, application: Option<&str>, args: &[String]) -> Result<(), String> {
@@ -4220,7 +4314,8 @@ mod tests {
         EVENT_SERVICE_CONTROL_UNKNOWN, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
         PowerHookAction, SERVICE_CONTROL_PAUSE, elevation_arguments, elevation_parameters,
         hook_deadline_ms, parse_u32, power_hook_action, priority_name, priority_value,
-        process_belongs_to_service_lifetime, queue_power_hook, service_control_event, valid_hook,
+        process_belongs_to_service_lifetime, queue_power_hook, quote_dump_arg,
+        service_control_event, valid_hook,
     };
 
     #[test]
@@ -4254,6 +4349,20 @@ mod tests {
         assert_eq!(remove_arguments, ["remove", "worker service", "confirm"]);
 
         assert!(elevation_arguments(&Command::List { all: false }).is_none());
+    }
+
+    #[test]
+    fn dump_quoting_escapes_cmd_special_characters_and_preserves_windows_arguments() {
+        assert_eq!(
+            quote_dump_arg("/c ping -n 30 127.0.0.1 > nul"),
+            "^\"/c ping -n 30 127.0.0.1 ^> nul^\""
+        );
+        assert_eq!(quote_dump_arg("two words"), "\"two words\"");
+        assert_eq!(
+            quote_dump_arg("C:\\Program Files\\app\\"),
+            "\"C:\\Program Files\\app\\\\\""
+        );
+        assert_eq!(quote_dump_arg("plain"), "plain");
     }
 
     #[test]
