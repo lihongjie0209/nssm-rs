@@ -8,7 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle, process::CommandExt},
     path::Path,
     process::{Child, Command as ProcessCommand, Stdio},
@@ -196,7 +196,7 @@ impl LogDestination {
         let mut options = OpenOptions::new();
         options
             .write(true)
-            .append(true)
+            .append(disposition != 2 && disposition != 5)
             .share_mode(self.sharing)
             .attributes(self.attributes);
         match disposition {
@@ -220,7 +220,9 @@ impl LogDestination {
                 ));
             }
         }
-        options.open(&self.path)
+        let mut file = options.open(&self.path)?;
+        file.seek(SeekFrom::End(0))?;
+        Ok(file)
     }
 }
 
@@ -2315,7 +2317,7 @@ fn open_stdio_file(
     options
         .read(input)
         .write(!input)
-        .append(!input)
+        .append(!input && disposition != 2 && disposition != 5)
         .share_mode(sharing)
         .attributes(attributes);
     match disposition {
@@ -2338,9 +2340,34 @@ fn open_stdio_file(
             ));
         }
     }
-    let file = options
+    let mut file = options
         .open(&path)
         .map_err(|error| format!("unable to open {setting} file {path}: {error}"))?;
+    if !input {
+        file.seek(SeekFrom::End(0))
+            .map_err(|error| format!("unable to seek to end of {setting} file {path}: {error}"))?;
+    }
+    Ok(Some(file))
+}
+
+fn open_hook_stdio_file(
+    service: &str,
+    setting: &str,
+    child_environment: &[String],
+) -> Result<Option<File>, String> {
+    let Some(path) = read_optional_reg_string(service, setting)? else {
+        return Ok(None);
+    };
+    let path = expand_environment_value(&path, child_environment);
+    let sharing = read_reg_dword(service, &format!("{setting}ShareMode"), 3)?;
+    let attributes = read_reg_dword(service, &format!("{setting}FlagsAndAttributes"), 128)?;
+    let file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .share_mode(sharing)
+        .attributes(attributes)
+        .open(&path)
+        .map_err(|error| format!("unable to open hook {setting} file {path}: {error}"))?;
     Ok(Some(file))
 }
 
@@ -2850,8 +2877,8 @@ fn invoke_hook(
         .env("NSSM_COMMAND_LINE", application_command_line)
         .env("NSSM_DEADLINE", deadline_ms.to_string());
     if read_reg_dword(service, "AppRedirectHook", 0)? != 0 {
-        let stdout = open_stdio_file(service, "AppStdout", child_environment, false)?;
-        let stderr = open_stdio_file(service, "AppStderr", child_environment, false)?;
+        let stdout = open_hook_stdio_file(service, "AppStdout", child_environment)?;
+        let stderr = open_hook_stdio_file(service, "AppStderr", child_environment)?;
         if let Some(stdout) = stdout {
             command.stdout(stdout);
         }
@@ -3150,6 +3177,24 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             finish_async_hooks();
             set_status(SERVICE_STOPPED, 99, 0);
             return;
+        }
+        for (setting, file) in [
+            ("AppStdout", stdout_file.as_mut()),
+            ("AppStderr", stderr_file.as_mut()),
+        ] {
+            if let Some(file) = file
+                && let Err(error) = file.seek(SeekFrom::End(0))
+            {
+                let reason = format!("unable to seek {setting} output after Start/Pre: {error}");
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_ERROR_TYPE,
+                    EVENT_START_SERVICE_FAILED,
+                    &[&app, &service_name, &reason],
+                );
+                finish_async_hooks();
+                set_status(SERVICE_STOPPED, 2, 0);
+                return;
+            }
         }
         if STOP_REQUESTED.load(Ordering::SeqCst) {
             break;

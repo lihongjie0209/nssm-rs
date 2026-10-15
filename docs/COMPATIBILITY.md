@@ -124,7 +124,9 @@ configuration readback, running state, wrapped process reporting, stop, removal
 and service disappearance. Live log rotation closes and moves the active file
 when CopyAndTruncate is disabled, or copies and truncates the same active file
 when enabled; Windows integration tests check backup data, continued output and
-active-file identity for both modes. The Windows suite also verifies that SCM stop reaches responding children through
+active-file identity for both modes. The stream redirection test now exercises
+both the default append behavior and explicit `CREATE_ALWAYS` truncation while
+checking stdin, stdout and stderr contents. The Windows suite also verifies that SCM stop reaches responding children through
 CTRL+C, WM_CLOSE and WM_QUIT before termination fallback; hook tests capture all
 documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
 Rotate/Pre/Post and verify the configured working directory. A service launch

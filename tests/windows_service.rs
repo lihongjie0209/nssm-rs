@@ -903,6 +903,12 @@ fn redirects_child_stdout_and_stderr_to_configured_files() {
             String::from_utf8_lossy(&configured.stderr)
         );
     }
+    let stdout_disposition = cli(&["set", &service, "AppStdoutCreationDisposition", "2"]);
+    assert!(
+        stdout_disposition.status.success(),
+        "stdout CREATE_ALWAYS configuration failed: {}",
+        String::from_utf8_lossy(&stdout_disposition.stderr)
+    );
     assert!(
         cli(&["set", &service, "AppExit", "Default", "Exit"])
             .status
@@ -946,8 +952,8 @@ fn redirects_child_stdout_and_stderr_to_configured_files() {
         "stdin was not delivered to the child: {stdout:?}"
     );
     assert!(
-        stdout.contains("existing-stdout"),
-        "stdout append mode truncated existing data: {stdout:?}"
+        !stdout.contains("existing-stdout"),
+        "stdout CREATE_ALWAYS retained existing data: {stdout:?}"
     );
     assert!(
         !stdout.contains("stderr-marker"),
