@@ -1223,6 +1223,11 @@ fn long_stop_wait_updates_status_and_logs_event_1078() {
         String::from_utf8_lossy(&stopped.stderr)
     );
     assert!(checkpoint > 0, "long stop wait advances the SCM checkpoint");
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap_or_default(),
+        "window-close",
+        "the delayed window fixture received WM_CLOSE"
+    );
     let stop_deadline = Instant::now() + Duration::from_secs(30);
     while !wait_for_service_state(&service, "SERVICE_STOPPED") && Instant::now() < stop_deadline {
         thread::sleep(Duration::from_millis(100));
@@ -1231,7 +1236,7 @@ fn long_stop_wait_updates_status_and_logs_event_1078() {
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "window-close");
 
     let event = format!(
-        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1078}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ $p = $event.Properties; if ($p.Count -eq 5 -and $p[1].Value -eq '{service}') {{ $values = ($p | ForEach-Object {{ $_.Value }}) -join '|'; Write-Output ('event 1078 values: ' + $values); if ($p[0].Value -eq 'kill_process()' -and $p[2].Value -eq 20000 -and $p[3].Value -eq 4000 -and $p[4].Value -eq 24000) {{ exit 0 }} }} }}; exit 1"
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; Id=1078}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ $p = $event.Properties; $values = ($p | ForEach-Object {{ $_.Value }}) -join '|'; Write-Output ('event 1078 provider=' + $event.ProviderName + ' values=' + $values); if ($event.ProviderName -eq 'nssm' -and $p.Count -eq 5 -and $p[0].Value -eq 'kill_process()' -and $p[1].Value -eq '{service}' -and $p[2].Value -eq 20000 -and $p[3].Value -eq 4000 -and $p[4].Value -eq 24000) {{ exit 0 }} }}; exit 1"
     );
     assert!(
         wait_for_windows_powershell_condition(&event),
