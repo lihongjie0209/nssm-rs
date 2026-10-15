@@ -182,12 +182,13 @@ service integration test queries the child process after launch and verifies
 that configured priority class and CPU affinity are effective at runtime. The
 SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
-acceptance scope includes system-level Power event delivery and event-log
-compatibility beyond events 1001, 1002, 1006, 1008, 1010, 1011, 1012, 1013, 1014,
-1015, 1016, 1020, 1021, 1034,
-1023, 1027, 1035, 1040, 1041, 1072 and 1077,
-broader error-path coverage, and command-by-command parity against the pinned
-reference. Missing-service exit status 3 is now covered for status, start, stop,
+acceptance scope includes system-level Power event delivery, broader error-path
+coverage, and command-by-command parity against the pinned reference. Verified
+event-log coverage includes events 1001, 1002, 1006, 1008, 1010, 1011, 1012,
+1013, 1014, 1015, 1016, 1020, 1021, 1023, 1027, 1034, 1035, 1036, 1040, 1041,
+1056, 1071, 1072 and 1077; events 1036, 1056 and 1071 cover invalid millisecond
+registry types and default fallbacks. Missing-service exit status 3 is now
+covered for status, start, stop,
 restart, pause, continue, rotate, get, set, reset and confirmed remove. A real
 SCM stop during the child-free restart-throttle wait verifies event 1012 and
 its service/application insertion values; stopping a running child verifies
