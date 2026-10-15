@@ -367,6 +367,79 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     return ,$results.ToArray()
 }
 
+function Run-FailedRestartScenario([string] $Binary, [string] $Service) {
+    $results = [System.Collections.Generic.List[object]]::new()
+    $application = Join-Path $env:TEMP "$Service.exe"
+    $unavailable = "$application.unavailable"
+    $cmd = Join-Path $env:WINDIR 'System32\cmd.exe'
+    try {
+        Copy-Item -LiteralPath $cmd -Destination $application -Force
+        Add-Result $results $Binary 'failed restart install' `
+            @('install', $Service, $application, '/c', 'exit 23') | Out-Null
+        Add-Result $results $Binary 'failed restart set AppExit' `
+            @('set', $Service, 'AppExit', '23', 'Restart') | Out-Null
+        Add-Result $results $Binary 'failed restart set delay' `
+            @('set', $Service, 'AppRestartDelay', '5000') | Out-Null
+
+        $startedAt = Get-Date
+        Add-Result $results $Binary 'failed restart start' `
+            @('start', $Service) | Out-Null
+        Wait-ServiceState $Binary $Service 'SERVICE_PAUSED'
+        Add-Result $results $Binary 'failed restart status during delay' `
+            @('status', $Service) | Out-Null
+        Move-Item -LiteralPath $application -Destination $unavailable
+
+        $deadline = (Get-Date).AddSeconds(30)
+        $event = $null
+        while ((Get-Date) -lt $deadline -and -not $event) {
+            $event = Get-WinEvent -FilterHashtable @{
+                LogName = 'Application'
+                ProviderName = 'nssm'
+                Id = 1007
+                StartTime = $startedAt
+            } -MaxEvents 100 -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Properties.Count -ge 2 -and
+                    [string]$_.Properties[0].Value -eq $application -and
+                    [string]$_.Properties[1].Value -eq $Service
+                } |
+                Select-Object -First 1
+            if (-not $event) {
+                Start-Sleep -Milliseconds 200
+            }
+        }
+        if (-not $event) {
+            throw "NSSM did not log event 1007 for failed restart of $Service"
+        }
+        $eventValues = @($event.Properties | ForEach-Object { [string]$_.Value })
+        $eventRecord = "$($event.Id)`n$($eventValues -join "`n")"
+        $results.Add([pscustomobject]@{
+            Label = 'failed restart event 1007'
+            ExitCode = 0
+            Stdout = [Convert]::ToBase64String([Text.Encoding]::Default.GetBytes($eventRecord))
+            Stderr = [Convert]::ToBase64String([byte[]]@())
+        })
+
+        $active = Invoke-Cli $Binary @('status', $Service)
+        $activeState = [Text.Encoding]::Default.GetString(
+            [Convert]::FromBase64String($active.Stdout)).Trim()
+        if ($active.ExitCode -ne 0 -or
+            $activeState -notin @('SERVICE_START_PENDING', 'SERVICE_PAUSED')) {
+            throw "Service left retry lifecycle after event 1007: $activeState"
+        }
+        Add-Result $results $Binary 'failed restart stop' `
+            @('stop', $Service) | Out-Null
+        Wait-ServiceState $Binary $Service 'SERVICE_STOPPED'
+        Add-Result $results $Binary 'failed restart remove' `
+            @('remove', $Service, 'confirm') | Out-Null
+        return ,$results.ToArray()
+    } finally {
+        Invoke-Cli $Binary @('stop', $Service) | Out-Null
+        Invoke-Cli $Binary @('remove', $Service, 'confirm') | Out-Null
+        Remove-Item -LiteralPath $application, $unavailable -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $stamp = [DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff')
 $service = "NssmRsParity$PID$stamp"
 $application = Join-Path $env:WINDIR 'System32\PING.EXE'
@@ -382,6 +455,12 @@ try {
         Invoke-Cli $binary @('remove', $service, 'confirm') | Out-Null
     }
 }
+
+$failureService = "${service}Fail"
+$referenceFailureResults = Run-FailedRestartScenario $ReferenceBinary $failureService
+$candidateFailureResults = Run-FailedRestartScenario $CandidateBinary $failureService
+$referenceResults += $referenceFailureResults
+$candidateResults += $candidateFailureResults
 
 if ($referenceResults.Count -ne $candidateResults.Count) {
     throw "Lifecycle result count differs: reference=$($referenceResults.Count), candidate=$($candidateResults.Count)"
