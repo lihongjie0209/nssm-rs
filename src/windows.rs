@@ -5,7 +5,7 @@ use nssm_rs::{
     quote_windows_arg, rotated_log_path, split_windows_args,
 };
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
@@ -75,7 +75,6 @@ static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_ENABLED: AtomicBool = AtomicBool::new(false);
 static CONTINUE_REQUESTED: AtomicBool = AtomicBool::new(false);
-static POWER_HOOK_REQUESTED: Mutex<VecDeque<PowerHookAction>> = Mutex::new(VecDeque::new());
 static HOOK_START_REQUESTED_COUNT: AtomicU32 = AtomicU32::new(0);
 static HOOK_START_COUNT: AtomicU32 = AtomicU32::new(0);
 static HOOK_EXIT_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -85,6 +84,7 @@ static HOOK_SERVICE_START_MS: AtomicU64 = AtomicU64::new(0);
 static HOOK_APPLICATION_START_MS: AtomicU64 = AtomicU64::new(0);
 static HOOK_APPLICATION_RUNTIME_MS: AtomicU64 = AtomicU64::new(0);
 static CHILD_PROCESS: Mutex<Option<ManagedChild>> = Mutex::new(None);
+static SERVICE_CHILD_ENVIRONMENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static ASYNC_HOOKS: Mutex<Vec<Child>> = Mutex::new(Vec::new());
 
 struct ManagedChild {
@@ -543,20 +543,21 @@ enum PowerHookAction {
     Resume,
 }
 
+impl PowerHookAction {
+    fn hook_action(self) -> &'static str {
+        match self {
+            Self::Change => "Change",
+            Self::Resume => "Resume",
+        }
+    }
+}
+
 fn power_hook_action(event_type: u32) -> Option<PowerHookAction> {
     match event_type {
         PBT_APMRESUMEAUTOMATIC => Some(PowerHookAction::Resume),
         PBT_APMPOWERSTATUSCHANGE => Some(PowerHookAction::Change),
         _ => None,
     }
-}
-
-fn queue_power_hook(queue: &mut VecDeque<PowerHookAction>, event_type: u32) -> bool {
-    let Some(action) = power_hook_action(event_type) else {
-        return false;
-    };
-    queue.push_back(action);
-    true
 }
 
 fn parse_u32(value: &str) -> Result<u32, String> {
@@ -3258,16 +3259,31 @@ unsafe extern "system" fn service_handler(
             ROTATE_REQUESTED.store(true, Ordering::SeqCst);
         }
         SERVICE_CONTROL_POWEREVENT => {
-            let queued = POWER_HOOK_REQUESTED
-                .lock()
-                .map(|mut pending| queue_power_hook(&mut pending, event_type))
-                .unwrap_or(false);
-            if !queued {
+            let Some(action) = power_hook_action(event_type) else {
                 report_service_control(&wide_pointer(context.cast()), control, false);
                 return NO_ERROR;
-            }
+            };
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
-            report_service_control(&wide_pointer(context.cast()), control, true);
+            let service_name = wide_pointer(context.cast());
+            report_service_control(&service_name, control, true);
+            let child_environment = SERVICE_CHILD_ENVIRONMENT
+                .lock()
+                .map(|environment| environment.clone())
+                .unwrap_or_default();
+            let app_pid = CHILD_PROCESS
+                .lock()
+                .ok()
+                .and_then(|child| child.as_ref().map(|child| child.child.id()));
+            let _ = invoke_hook(
+                &service_name,
+                "Power",
+                action.hook_action(),
+                &child_environment,
+                app_pid,
+                None,
+                true,
+                false,
+            );
         }
         SERVICE_CONTROL_CONTINUE => {
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
@@ -3310,9 +3326,6 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     let service_name =
         String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name_ptr, len) });
     STOP_REQUESTED.store(false, Ordering::SeqCst);
-    if let Ok(mut pending) = POWER_HOOK_REQUESTED.lock() {
-        pending.clear();
-    }
     CONTINUE_REQUESTED.store(false, Ordering::SeqCst);
     HOOK_START_REQUESTED_COUNT.store(0, Ordering::SeqCst);
     HOOK_START_COUNT.store(0, Ordering::SeqCst);
@@ -3372,6 +3385,9 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             return;
         }
     };
+    if let Ok(mut environment) = SERVICE_CHILD_ENVIRONMENT.lock() {
+        *environment = child_environment.clone();
+    }
     let throttle_ms = match read_reg_dword(&service_name, "AppThrottle", 1500) {
         Ok(value) => value,
         Err(_) => {
@@ -3725,43 +3741,6 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         loop {
             if STOP_REQUESTED.load(Ordering::SeqCst) {
                 break;
-            }
-            let requested_power_hook = POWER_HOOK_REQUESTED
-                .lock()
-                .ok()
-                .and_then(|mut pending| pending.pop_front());
-            match requested_power_hook {
-                Some(PowerHookAction::Change) => {
-                    let _ = invoke_hook(
-                        &service_name,
-                        "Power",
-                        "Change",
-                        &child_environment,
-                        CHILD_PROCESS
-                            .lock()
-                            .ok()
-                            .and_then(|child| child.as_ref().map(|child| child.child.id())),
-                        None,
-                        false,
-                        false,
-                    );
-                }
-                Some(PowerHookAction::Resume) => {
-                    let _ = invoke_hook(
-                        &service_name,
-                        "Power",
-                        "Resume",
-                        &child_environment,
-                        CHILD_PROCESS
-                            .lock()
-                            .ok()
-                            .and_then(|child| child.as_ref().map(|child| child.child.id())),
-                        None,
-                        false,
-                        false,
-                    );
-                }
-                _ => {}
             }
             let requested_rotation = ROTATE_REQUESTED.swap(false, Ordering::SeqCst);
             let check_thresholds = rotate_online
@@ -4307,15 +4286,12 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-
     use super::{
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
         EVENT_SERVICE_CONTROL_UNKNOWN, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
         PowerHookAction, SERVICE_CONTROL_PAUSE, elevation_arguments, elevation_parameters,
         hook_deadline_ms, parse_u32, power_hook_action, priority_name, priority_value,
-        process_belongs_to_service_lifetime, queue_power_hook, quote_dump_arg,
-        service_control_event, valid_hook,
+        process_belongs_to_service_lifetime, quote_dump_arg, service_control_event, valid_hook,
     };
 
     #[test]
@@ -4391,16 +4367,9 @@ mod tests {
     }
 
     #[test]
-    fn queued_power_hooks_preserve_each_supported_event_in_arrival_order() {
-        let mut pending = VecDeque::new();
-        assert!(queue_power_hook(&mut pending, PBT_APMPOWERSTATUSCHANGE));
-        assert!(queue_power_hook(&mut pending, PBT_APMRESUMEAUTOMATIC));
-        assert!(!queue_power_hook(&mut pending, 7));
-        assert!(queue_power_hook(&mut pending, PBT_APMPOWERSTATUSCHANGE));
-        assert_eq!(pending.pop_front(), Some(PowerHookAction::Change));
-        assert_eq!(pending.pop_front(), Some(PowerHookAction::Resume));
-        assert_eq!(pending.pop_front(), Some(PowerHookAction::Change));
-        assert!(pending.is_empty());
+    fn power_hook_actions_use_nssm_hook_names() {
+        assert_eq!(PowerHookAction::Change.hook_action(), "Change");
+        assert_eq!(PowerHookAction::Resume.hook_action(), "Resume");
     }
 
     #[test]
