@@ -815,7 +815,12 @@ fn runs_configured_start_and_exit_hooks() {
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    let _files = FileCleanup(event_paths.clone());
+    let hook_working_directory = std::env::temp_dir().join(&service);
+    std::fs::create_dir(&hook_working_directory).expect("hook working directory is created");
+    let cwd_marker = std::env::temp_dir().join(format!("{service}_hook_cwd.txt"));
+    let cwd_marker = cwd_marker.to_string_lossy().into_owned();
+    let _files = FileCleanup([event_paths.clone(), vec![cwd_marker.clone()]].concat());
+    let _directory = DirectoryCleanup(hook_working_directory.to_string_lossy().into_owned());
     let installed = cli(&["install", &service, &command_prompt, "/c", "exit 0"]);
     assert!(
         installed.status.success(),
@@ -824,6 +829,12 @@ fn runs_configured_start_and_exit_hooks() {
     );
     assert!(
         cli(&["set", &service, "DisplayName", "Hook ABITest Service"])
+            .status
+            .success()
+    );
+    let hook_working_directory = hook_working_directory.to_string_lossy().into_owned();
+    assert!(
+        cli(&["set", &service, "AppDirectory", &hook_working_directory])
             .status
             .success()
     );
@@ -838,7 +849,11 @@ fn runs_configured_start_and_exit_hooks() {
         let hook = if event_action == "Start/Post" {
             format!("cmd.exe /c set NSSM_COMMAND_LINE>{path}")
         } else {
-            format!("cmd.exe /c echo {marker}>{path}")
+            if event_action == "Start/Pre" {
+                format!("cmd.exe /c echo {marker}>{path} & cd > {cwd_marker}")
+            } else {
+                format!("cmd.exe /c echo {marker}>{path}")
+            }
         };
         let configured = cli(&["set", &service, "AppEvents", event_action, &hook]);
         assert!(
@@ -895,6 +910,12 @@ fn runs_configured_start_and_exit_hooks() {
     assert_eq!(fields.next(), Some("ABITest"));
     assert_eq!(fields.next(), Some("Service"));
     assert_eq!(fields.next(), Some(env!("NSSM_BUILD_DATE")));
+    assert_eq!(
+        std::fs::read_to_string(&cwd_marker)
+            .expect("hook writes its current directory")
+            .trim(),
+        hook_working_directory
+    );
     let start_post = std::fs::read_to_string(&event_paths[1]).unwrap();
     assert!(start_post.starts_with("NSSM_COMMAND_LINE=\""));
     assert!(start_post.contains("cmd.exe\""));
@@ -1510,6 +1531,13 @@ impl Drop for FileCleanup {
         for path in &self.0 {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+struct DirectoryCleanup(String);
+impl Drop for DirectoryCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

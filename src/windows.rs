@@ -2603,6 +2603,21 @@ fn invoke_hook(
     }
     let image = std::env::current_exe().map_err(|error| error.to_string())?;
     let application = read_optional_reg_string(service, "Application")?.unwrap_or_default();
+    let working_directory = read_optional_reg_string(service, "AppDirectory")?
+        .filter(|directory| !directory.is_empty())
+        .map(|directory| expand_environment_value(&directory, child_environment))
+        .or_else(|| {
+            Path::new(&application)
+                .parent()
+                .filter(|directory| !directory.as_os_str().is_empty())
+                .map(|directory| directory.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| {
+            std::env::var("WINDIR")
+                .map(|directory| format!("{directory}\\System32"))
+                .unwrap_or_else(|_| r"C:\Windows\System32".to_owned())
+        });
+    command.current_dir(working_directory);
     let parameters = read_optional_reg_string(service, "AppParameters")?.unwrap_or_default();
     let application_command_line = format!("\"{application}\" {parameters}");
     let architecture = if cfg!(target_pointer_width = "64") {
