@@ -1,0 +1,5 @@
+This project is an independent Rust reimplementation of the command-line behavior of NSSM.
+
+Reference project: https://github.com/ONLYOFFICE/nssm
+Upstream documentation describes NSSM as public domain: https://nssm.cc/download
+No upstream source files are included in this repository.

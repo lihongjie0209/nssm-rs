@@ -1,0 +1,67 @@
+use nssm_r::{Command, VERSION, parse_args};
+use std::process::ExitCode;
+
+const USAGE: &str = "nssm-r: Windows service wrapper\n\nUsage: nssm-r <command> [arguments]\n\nCommands: install, remove, start, stop, restart, pause, continue, status, statuscode, get, set, reset, unset, rotate, list, dump, processes, help, version\n";
+
+fn run(args: &[String]) -> Result<(), String> {
+    match parse_args(args).map_err(|e| e.to_string())? {
+        Command::Help => {
+            print!("{USAGE}");
+            Ok(())
+        }
+        Command::Version => {
+            println!("nssm-r {VERSION}");
+            Ok(())
+        }
+        command => {
+            #[cfg(not(windows))]
+            {
+                let _ = command;
+                Err("nssm-r manages Windows services and must run on Windows".into())
+            }
+            #[cfg(windows)]
+            {
+                windows_backend::execute(command)
+            }
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "__service") {
+        #[cfg(windows)]
+        {
+            return match args.get(1).map(|s| crate::windows::run_service(s)) {
+                Some(Ok(())) => ExitCode::SUCCESS,
+                Some(Err(error)) => {
+                    eprintln!("nssm-r service host: {error}");
+                    ExitCode::FAILURE
+                }
+                None => ExitCode::FAILURE,
+            };
+        }
+        #[cfg(not(windows))]
+        {
+            return ExitCode::FAILURE;
+        }
+    }
+    match run(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("nssm-r: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(windows)]
+mod windows_backend {
+    use nssm_r::Command;
+    pub fn execute(command: Command) -> Result<(), String> {
+        crate::windows::execute(command)
+    }
+}
+
+#[cfg(windows)]
+mod windows;
