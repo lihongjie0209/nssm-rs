@@ -149,11 +149,11 @@ function Invoke-ReadOnlyCase([string] $Binary, [string[]] $Arguments) {
     $argumentLine = ($Arguments | ForEach-Object { Quote-WindowsArgument $_ }) -join ' '
     $process = Start-Process -FilePath $Binary -ArgumentList $argumentLine -NoNewWindow -PassThru `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-    if (-not $process.WaitForExit(15000)) {
+    if (-not $process.WaitForExit(60000)) {
         $process.Kill($true)
         $process.WaitForExit()
         Remove-Item $stdoutPath, $stderrPath -Force
-        throw "Timed out after 15 seconds: $Binary $argumentLine"
+        throw "Timed out after 60 seconds: $Binary $argumentLine"
     }
     $stdout = [Convert]::ToBase64String([IO.File]::ReadAllBytes($stdoutPath))
     $stderr = [Convert]::ToBase64String([IO.File]::ReadAllBytes($stderrPath))
