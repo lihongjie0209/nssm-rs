@@ -992,6 +992,88 @@ fn rotates_and_stops_through_the_configured_hooks_in_order() {
 }
 
 #[test]
+fn redirects_hook_stdout_and_stderr_when_enabled() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let ping = format!("{windows}\\System32\\PING.EXE");
+    let stdout_path = std::env::temp_dir().join(format!("{service}_hook_stdout.log"));
+    let stderr_path = std::env::temp_dir().join(format!("{service}_hook_stderr.log"));
+    let stdout_path = stdout_path.to_string_lossy().into_owned();
+    let stderr_path = stderr_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![stdout_path.clone(), stderr_path.clone()]);
+    let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    for (setting, path) in [("AppStdout", &stdout_path), ("AppStderr", &stderr_path)] {
+        let configured = cli(&["set", &service, setting, path]);
+        assert!(
+            configured.status.success(),
+            "{setting} set failed: {}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+    }
+    assert!(
+        cli(&["set", &service, "AppRedirectHook", "1"])
+            .status
+            .success()
+    );
+    let hook = "cmd.exe /c echo hook-stdout & echo hook-stderr 1>&2";
+    let configured = cli(&["set", &service, "AppEvents", "Start/Pre", hook]);
+    assert!(
+        configured.status.success(),
+        "hook set failed: {}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_RUNNING"));
+    let mut redirected = false;
+    for _ in 0..100 {
+        let stdout = std::fs::read(&stdout_path)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        let stderr = std::fs::read(&stderr_path)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        if stdout.contains("hook-stdout") && stderr.contains("hook-stderr") {
+            redirected = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        redirected,
+        "hook output was not redirected to configured files: stdout={:?}, stderr={:?}",
+        std::fs::read(&stdout_path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+        std::fs::read(&stderr_path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    );
+    let stdout = String::from_utf8_lossy(&std::fs::read(&stdout_path).expect("stdout log exists"))
+        .into_owned();
+    let stderr = String::from_utf8_lossy(&std::fs::read(&stderr_path).expect("stderr log exists"))
+        .into_owned();
+    assert!(stdout.contains("hook-stdout"), "stdout log: {stdout:?}");
+    assert!(!stdout.contains("hook-stderr"), "stdout log: {stdout:?}");
+    assert!(stderr.contains("hook-stderr"), "stderr log: {stderr:?}");
+    assert!(!stderr.contains("hook-stdout"), "stderr log: {stderr:?}");
+
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+}
+
+#[test]
 fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
