@@ -1,8 +1,8 @@
 use nssm_rs::{
-    Command, ExitAction, MANAGED_SETTINGS, SettingKind, StopMethod, compose_child_environment,
-    edit_dependencies, edit_environment, expand_environment_value, log_rotation_due,
-    managed_setting, normalize_cpu_affinity, normalize_exit_action, parse_cpu_affinity,
-    quote_windows_arg, rotated_log_path, split_windows_args,
+    Command, ExitAction, LaunchFailureDisposition, MANAGED_SETTINGS, SettingKind, StopMethod,
+    compose_child_environment, edit_dependencies, edit_environment, expand_environment_value,
+    log_rotation_due, managed_setting, normalize_cpu_affinity, normalize_exit_action,
+    parse_cpu_affinity, quote_windows_arg, rotated_log_path, split_windows_args,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -22,24 +22,26 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, ERROR_NO_MORE_ITEMS, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM,
-        NO_ERROR, WPARAM,
+        CloseHandle, ERROR_NO_MORE_FILES, ERROR_NO_MORE_ITEMS, FILETIME, HANDLE, HWND,
+        INVALID_HANDLE_VALUE, LPARAM, NO_ERROR, WAIT_OBJECT_0, WPARAM,
     },
-    Globalization::WideCharToMultiByte,
+    Globalization::{
+        CSTR_EQUAL, CompareStringOrdinal, GetUserDefaultUILanguage, WideCharToMultiByte,
+    },
     System::Console::{
         AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleMode,
         GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCtrlHandler,
         SetConsoleOutputCP, WriteConsoleW,
     },
     System::{
-        Diagnostics::ToolHelp::*,
+        Diagnostics::{Debug::FormatMessageW, ToolHelp::*},
         EventLog::{
             DeregisterEventSource, EVENTLOG_ERROR_TYPE, RegisterEventSourceW, ReportEventW,
         },
         JobObjects::*,
         Registry::*,
         Services::*,
-        SystemInformation::GetSystemTimeAsFileTime,
+        SystemInformation::{GetSystemTimeAsFileTime, GetWindowsDirectoryW},
         Threading::*,
     },
     UI::Shell::{IsUserAnAdmin, SHELLEXECUTEINFOW, ShellExecuteExW},
@@ -54,8 +56,12 @@ const STOP_SKIP_CONSOLE: u32 = 1;
 const SERVICE_INTERACTIVE_PROCESS_FLAG: u32 = 0x100;
 const EVENT_DISPATCHER_FAILED: u32 = 0xc000_03e9;
 const EVENT_START_SERVICE_FAILED: u32 = 0xc000_03ee;
+const EVENT_RESTART_SERVICE_FAILED: u32 = 0x8000_03ef;
 const EVENT_STARTED_SERVICE: u32 = 0x4000_03f0;
 const EVENT_CREATEPROCESS_FAILED: u32 = 0xc000_03f2;
+const EVENT_CREATEFILE_FAILED: u32 = 0xc000_0419;
+const EVENT_DUPLICATEHANDLE_FAILED: u32 = 0xc000_041a;
+const EVENT_GET_OUTPUT_HANDLES_FAILED: u32 = 0xc000_041b;
 const EVENT_TERMINATEPROCESS: u32 = 0x4000_03f3;
 const EVENT_PROCESS_ALREADY_STOPPED: u32 = 0x4000_03f4;
 const EVENT_ENDED_SERVICE: u32 = 0x4000_03f5;
@@ -68,6 +74,18 @@ const EVENT_RESET_THROTTLE: u32 = 0x4000_040b;
 const EVENT_THROTTLED: u32 = 0x8000_040a;
 const EVENT_RESTART_DELAY: u32 = 0x4000_0430;
 const EVENT_ROTATED: u32 = 0x4000_0435;
+const EVENT_HOOK_CREATEPROCESS_FAILED: u32 = 0xc000_0438;
+const EVENT_GET_HOOK_FAILED: u32 = 0xc000_0439;
+const EVENT_NO_FLAGS: u32 = 0x8000_0405;
+const EVENT_NO_DIRECTORY: u32 = 0x8000_0406;
+const EVENT_DIRECTORY_FAILED: u32 = 0xc000_0407;
+const EVENT_GET_PARAMETERS_FAILED: u32 = 0xc000_03ec;
+const EVENT_REGISTER_HANDLER_FAILED: u32 = 0xc000_03ed;
+const EVENT_PROCESS_SNAPSHOT_FAILED: u32 = 0xc000_0400;
+const EVENT_PROCESS_ENUMERATE_FAILED: u32 = 0xc000_0401;
+const EVENT_OPEN_PROCESS_FAILED: u32 = 0xc000_0402;
+const EVENT_GET_PROCESS_TIMES_FAILED: u32 = 0xc000_0414;
+const EVENT_ROTATE_FILE_FAILED: u32 = 0xc000_0427;
 const EVENT_SERVICE_CONTROL_HANDLED: u32 = 0x4000_0410;
 const EVENT_SERVICE_CONTROL_NOT_HANDLED: u32 = 0x4000_0411;
 const EVENT_SERVICE_CONTROL_UNKNOWN: u32 = 0x4000_0412;
@@ -216,6 +234,31 @@ struct LogDestination {
     file: Mutex<Option<File>>,
 }
 
+#[derive(Debug)]
+struct RotationFailure {
+    operation: &'static str,
+    target: String,
+    message: String,
+}
+
+impl RotationFailure {
+    fn from_io(operation: &'static str, target: &str, error: &io::Error) -> Self {
+        Self {
+            operation,
+            target: target.to_owned(),
+            message: windows_error_message(error),
+        }
+    }
+
+    fn from_message(operation: &'static str, target: &str, message: impl Into<String>) -> Self {
+        Self {
+            operation,
+            target: target.to_owned(),
+            message: message.into(),
+        }
+    }
+}
+
 impl LogDestination {
     fn new(service: &str, setting: &str, path: String, file: File) -> Result<Arc<Self>, String> {
         let sharing = read_reg_dword(service, &format!("{setting}ShareMode"), 3)?;
@@ -249,17 +292,24 @@ impl LogDestination {
         delay: Duration,
         force: bool,
         copy_and_truncate: bool,
-    ) -> Result<Option<std::path::PathBuf>, String> {
-        let mut file_guard = self
-            .file
-            .lock()
-            .map_err(|_| "log destination lock poisoned".to_owned())?;
+    ) -> Result<Option<std::path::PathBuf>, RotationFailure> {
+        let mut file_guard = self.file.lock().map_err(|_| {
+            RotationFailure::from_message(
+                "rotate_log_file()",
+                &self.path,
+                "log destination lock poisoned",
+            )
+        })?;
         let metadata = match fs::metadata(&self.path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                return Err(RotationFailure::from_io("CreateFile()", &self.path, &error));
+            }
         };
-        let modified = metadata.modified().map_err(|error| error.to_string())?;
+        let modified = metadata.modified().map_err(|error| {
+            RotationFailure::from_io("GetFileInformationByHandle()", &self.path, &error)
+        })?;
         if !log_rotation_due(
             metadata.len(),
             modified.elapsed().unwrap_or_default(),
@@ -270,50 +320,72 @@ impl LogDestination {
             return Ok(None);
         }
         let rotated = rotated_log_path(Path::new(&self.path), std::time::SystemTime::now())
-            .ok_or_else(|| format!("could not create rotated name for {}", self.path))?;
+            .ok_or_else(|| {
+                RotationFailure::from_message(
+                    "rotated_filename()",
+                    &self.path,
+                    "could not create rotated filename",
+                )
+            })?;
         file_guard
             .as_mut()
-            .ok_or_else(|| "log destination is closed".to_owned())?
+            .ok_or_else(|| {
+                RotationFailure::from_message(
+                    "FlushFileBuffers()",
+                    &self.path,
+                    "log destination is closed",
+                )
+            })?
             .flush()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| RotationFailure::from_io("FlushFileBuffers()", &self.path, &error))?;
 
         if copy_and_truncate {
             fs::copy(&self.path, &rotated).map_err(|error| {
-                format!(
-                    "unable to copy {} to {}: {error}",
-                    self.path,
-                    rotated.display()
-                )
+                RotationFailure::from_io("CopyFile()", &rotated.to_string_lossy(), &error)
             })?;
             drop(file_guard);
             if !delay.is_zero() {
                 thread::sleep(delay);
             }
-            let mut file_guard = self
-                .file
-                .lock()
-                .map_err(|_| "log destination lock poisoned".to_owned())?;
+            let mut file_guard = self.file.lock().map_err(|_| {
+                RotationFailure::from_message(
+                    "SetEndOfFile()",
+                    &self.path,
+                    "log destination lock poisoned",
+                )
+            })?;
             file_guard
                 .as_mut()
-                .expect("log file remains open while copy-truncating")
+                .ok_or_else(|| {
+                    RotationFailure::from_message(
+                        "SetEndOfFile()",
+                        &self.path,
+                        "log destination is closed",
+                    )
+                })?
                 .set_len(0)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| RotationFailure::from_io("SetEndOfFile()", &self.path, &error))?;
         } else {
             drop(file_guard.take());
             if let Err(error) = fs::rename(&self.path, &rotated) {
                 self.disposition.store(4, Ordering::SeqCst);
                 *file_guard = Some(self.reopen(4).map_err(|reopen| {
-                    format!(
-                        "unable to move {}: {error}; reopen failed: {reopen}",
-                        self.path
+                    RotationFailure::from_message(
+                        "MoveFile()",
+                        &rotated.to_string_lossy(),
+                        format!("{error}; reopen failed: {reopen}"),
                     )
                 })?);
-                return Err(format!("unable to move {}: {error}", self.path));
+                return Err(RotationFailure::from_io(
+                    "MoveFile()",
+                    &rotated.to_string_lossy(),
+                    &error,
+                ));
             }
             *file_guard = Some(
                 self.reopen(self.disposition.load(Ordering::SeqCst))
                     .map_err(|error| {
-                        format!("unable to reopen {} after rotation: {error}", self.path)
+                        RotationFailure::from_io("CreateFile()", &self.path, &error)
                     })?,
             );
         }
@@ -518,7 +590,7 @@ fn encode_wide(value: &str, terminators: usize) -> Vec<u8> {
 }
 
 fn decode_wide(data: &[u8]) -> Result<String, String> {
-    if data.len() % 2 != 0 {
+    if !data.len().is_multiple_of(2) {
         return Err("registry string has an odd byte length".into());
     }
     let chars: Vec<u16> = data
@@ -530,7 +602,7 @@ fn decode_wide(data: &[u8]) -> Result<String, String> {
 }
 
 fn decode_multi_string(data: &[u8]) -> Result<Vec<String>, String> {
-    if data.len() % 2 != 0 {
+    if !data.len().is_multiple_of(2) {
         return Err("registry multi-string has an odd byte length".into());
     }
     let chars: Vec<u16> = data
@@ -1868,7 +1940,7 @@ fn dump_service(source: &str, target: Option<&str>) -> Result<(), (u8, String)> 
     let target = target.unwrap_or(source);
     let executable = std::env::current_exe().map_err(|error| (6, error.to_string()))?;
     let executable = executable.to_string_lossy();
-    let install = vec![
+    let install = [
         quote_dump_arg(&executable),
         "install".into(),
         quote_dump_arg(target),
@@ -2024,6 +2096,80 @@ fn report_event(event_type: u16, event_id: u32, values: &[&str]) {
             ptr::null(),
         );
         DeregisterEventSource(handle);
+    }
+}
+
+fn windows_directory() -> Option<String> {
+    let mut buffer = vec![0u16; 32768];
+    let length = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 || length as usize >= buffer.len() {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+fn wait_for_restart_delay(
+    service_name: &str,
+    delay: u32,
+    throttle_ms: u32,
+    restart_delay_ms: u32,
+    throttle: &mut nssm_rs::RestartThrottle,
+) {
+    let throttle_count = throttle.counter();
+    HOOK_THROTTLE_COUNT.store(throttle_count, Ordering::SeqCst);
+    if delay == 0 {
+        return;
+    }
+    let backoff_ms = nssm_rs::restart_wait_ms(throttle_count.saturating_sub(1), 0);
+    if restart_delay_ms > backoff_ms {
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+            EVENT_RESTART_DELAY,
+            &[service_name, &delay.to_string()],
+        );
+    } else {
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+            EVENT_THROTTLED,
+            &[service_name, &throttle_ms.to_string(), &delay.to_string()],
+        );
+    }
+    CONTINUE_REQUESTED.store(false, Ordering::SeqCst);
+    set_status(SERVICE_PAUSED, 0, delay);
+    let deadline = Instant::now() + Duration::from_millis(delay as u64);
+    while !STOP_REQUESTED.load(Ordering::SeqCst) && Instant::now() < deadline {
+        if CONTINUE_REQUESTED.swap(false, Ordering::SeqCst) {
+            throttle.mark_stable();
+            HOOK_THROTTLE_COUNT.store(0, Ordering::SeqCst);
+            break;
+        }
+        thread::sleep(
+            Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
+fn retry_failed_restart_launch(
+    service_name: &str,
+    app: &str,
+    throttle_ms: u32,
+    restart_delay_ms: u32,
+    throttle: &mut nssm_rs::RestartThrottle,
+) {
+    report_event(
+        windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+        EVENT_RESTART_SERVICE_FAILED,
+        &[app, service_name],
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !STOP_REQUESTED.load(Ordering::SeqCst) && Instant::now() < deadline {
+        thread::sleep(
+            Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    if !STOP_REQUESTED.load(Ordering::SeqCst) {
+        let delay = throttle.after_exit();
+        wait_for_restart_delay(service_name, delay, throttle_ms, restart_delay_ms, throttle);
     }
 }
 
@@ -2321,14 +2467,19 @@ struct ProcessImage {
     creation_time: u64,
 }
 
+enum ProcessImageError {
+    Open(io::Error),
+    Times,
+}
+
 fn filetime_value(time: FILETIME) -> u64 {
     (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
 }
 
-fn process_image(pid: u32) -> io::Result<ProcessImage> {
+fn process_image(pid: u32) -> Result<ProcessImage, ProcessImageError> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
     if process.is_null() {
-        return Err(io::Error::last_os_error());
+        return Err(ProcessImageError::Open(io::Error::last_os_error()));
     }
     let mut creation = FILETIME::default();
     let mut exit = FILETIME::default();
@@ -2336,10 +2487,16 @@ fn process_image(pid: u32) -> io::Result<ProcessImage> {
     let mut user = FILETIME::default();
     if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
         let error = io::Error::last_os_error();
+        let error_message = windows_error_message(&error);
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_GET_PROCESS_TIMES_FAILED,
+            &[&error_message],
+        );
         unsafe {
             CloseHandle(process);
         }
-        return Err(error);
+        return Err(ProcessImageError::Times);
     }
     let mut path = vec![0u16; 32768];
     let mut size = path.len() as u32;
@@ -2390,22 +2547,41 @@ fn process_tree(service: &str) -> Result<(), String> {
     }
     let root_image = match process_image(root) {
         Ok(image) => image,
-        Err(error) => {
+        Err(ProcessImageError::Open(error)) => {
             cli_eprintln!("{service}: {root}: {error}");
             return Ok(());
         }
+        Err(ProcessImageError::Times) => return Ok(()),
     };
     let mut service_exit_time = FILETIME::default();
     unsafe { GetSystemTimeAsFileTime(&mut service_exit_time) };
     let service_lifetime = (root_image.creation_time, filetime_value(service_exit_time));
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
-        return Err(io::Error::last_os_error().to_string());
+        let error = io::Error::last_os_error();
+        let error_message = windows_error_message(&error);
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_PROCESS_SNAPSHOT_FAILED,
+            &[service, &error_message],
+        );
+        return Err(error.to_string());
     }
     let mut processes = HashMap::<u32, Vec<ProcessEntry>>::new();
-    let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
+    if ok == 0 {
+        let error = io::Error::last_os_error();
+        let error_message = windows_error_message(&error);
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_PROCESS_ENUMERATE_FAILED,
+            &[service, &error_message],
+        );
+    }
     while ok != 0 {
         processes
             .entry(entry.th32ParentProcessID)
@@ -2414,11 +2590,23 @@ fn process_tree(service: &str) -> Result<(), String> {
                 pid: entry.th32ProcessID,
             });
         ok = unsafe { Process32NextW(snapshot, &mut entry) };
+        if ok == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+                let error_message = windows_error_message(&error);
+                report_event(
+                    EVENTLOG_ERROR_TYPE,
+                    EVENT_PROCESS_ENUMERATE_FAILED,
+                    &[service, &error_message],
+                );
+            }
+        }
     }
     unsafe {
         CloseHandle(snapshot);
     }
     fn visit(
+        service: &str,
         pid: u32,
         depth: usize,
         root_image: Option<&ProcessImage>,
@@ -2435,7 +2623,20 @@ fn process_tree(service: &str) -> Result<(), String> {
                 creation_time: image.creation_time,
             })
         } else {
-            process_image(pid).ok()
+            match process_image(pid) {
+                Ok(image) => Some(image),
+                Err(ProcessImageError::Open(error)) => {
+                    let pid = pid.to_string();
+                    let error_message = windows_error_message(&error);
+                    report_event(
+                        EVENTLOG_ERROR_TYPE,
+                        EVENT_OPEN_PROCESS_FAILED,
+                        &[&pid, service, &error_message],
+                    );
+                    return;
+                }
+                Err(ProcessImageError::Times) => return,
+            }
         };
         let Some(image) = image else { return };
         if !process_belongs_to_service_lifetime(
@@ -2448,11 +2649,20 @@ fn process_tree(service: &str) -> Result<(), String> {
         cli_println!("{pid:>8} {}{}\r", " ".repeat(depth), image.path);
         if let Some(children) = tree.get(&pid) {
             for child in children {
-                visit(child.pid, depth + 1, None, service_lifetime, tree, seen);
+                visit(
+                    service,
+                    child.pid,
+                    depth + 1,
+                    None,
+                    service_lifetime,
+                    tree,
+                    seen,
+                );
             }
         }
     }
     visit(
+        service,
         root,
         0,
         Some(&root_image),
@@ -2466,6 +2676,10 @@ fn process_tree(service: &str) -> Result<(), String> {
 fn processes(services: &[String]) -> Result<(), String> {
     let mut errors = Vec::new();
     for service in services {
+        if service_is_missing(service) {
+            errors.push("Can't open service!".to_owned());
+            continue;
+        }
         if let Err(error) = process_tree(service) {
             errors.push(format!("{service}: {error}"));
         }
@@ -2638,7 +2852,7 @@ fn read_optional_reg_string(service: &str, value: &str) -> Result<Option<String>
         }
         return Err(registry_error(code));
     }
-    let mut data = vec![0u16; (bytes as usize + 1) / 2];
+    let mut data = vec![0u16; (bytes as usize).div_ceil(2)];
     let code = unsafe {
         RegQueryValueExW(
             key,
@@ -2707,17 +2921,38 @@ fn read_reg_dword(service: &str, value: &str, default: u32) -> Result<u32, Strin
     Ok(data)
 }
 
+#[derive(Debug)]
+enum StdioFileError {
+    Configuration,
+    Create {
+        path: String,
+        error: io::Error,
+    },
+    Duplicate {
+        source: &'static str,
+        destination: &'static str,
+        error: io::Error,
+    },
+    Seek,
+}
+
+impl From<String> for StdioFileError {
+    fn from(_: String) -> Self {
+        Self::Configuration
+    }
+}
+
 fn open_stdio_file(
     service: &str,
     setting: &str,
     child_environment: &[String],
     input: bool,
-) -> Result<Option<File>, String> {
+) -> Result<Option<File>, StdioFileError> {
     let Some(path) = read_optional_reg_string(service, setting)? else {
         return Ok(None);
     };
     let path = expand_environment_value(&path, child_environment);
-    let prefix = format!("{setting}");
+    let prefix = setting.to_owned();
     let default_sharing = if input { 2 } else { 3 };
     let default_disposition = if input { 3 } else { 4 };
     let sharing = read_reg_dword(service, &format!("{prefix}ShareMode"), default_sharing)?;
@@ -2749,19 +2984,111 @@ fn open_stdio_file(
             options.truncate(true);
         }
         _ => {
-            return Err(format!(
-                "invalid {setting} creation disposition: {disposition}"
-            ));
+            return Err(format!("invalid {setting} creation disposition: {disposition}").into());
         }
     }
     let mut file = options
         .open(&path)
-        .map_err(|error| format!("unable to open {setting} file {path}: {error}"))?;
+        .map_err(|error| StdioFileError::Create {
+            path: path.clone(),
+            error,
+        })?;
     if !input {
         file.seek(SeekFrom::End(0))
-            .map_err(|error| format!("unable to seek to end of {setting} file {path}: {error}"))?;
+            .map_err(|_| StdioFileError::Seek)?;
     }
     Ok(Some(file))
+}
+
+fn report_stdio_setup_failure(service: &str, app: &str, error: &StdioFileError) {
+    match error {
+        StdioFileError::Create { path, error } => {
+            let error_message = windows_error_message(error);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_CREATEFILE_FAILED,
+                &[path, &error_message],
+            );
+        }
+        StdioFileError::Duplicate {
+            source,
+            destination,
+            error,
+        } => {
+            let error_message = windows_error_message(error);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_DUPLICATEHANDLE_FAILED,
+                &[source, destination, &error_message],
+            );
+        }
+        StdioFileError::Configuration | StdioFileError::Seek => {}
+    }
+    report_event(
+        EVENTLOG_ERROR_TYPE,
+        EVENT_GET_OUTPUT_HANDLES_FAILED,
+        &[service],
+    );
+    report_event(
+        EVENTLOG_ERROR_TYPE,
+        EVENT_START_SERVICE_FAILED,
+        &[app, service, "4"],
+    );
+}
+
+fn windows_paths_equal(first: &str, second: &str) -> bool {
+    let first: Vec<u16> = first.encode_utf16().collect();
+    let second: Vec<u16> = second.encode_utf16().collect();
+    unsafe {
+        CompareStringOrdinal(
+            first.as_ptr(),
+            first.len() as i32,
+            second.as_ptr(),
+            second.len() as i32,
+            1,
+        ) == CSTR_EQUAL
+    }
+}
+
+fn windows_error_message(error: &io::Error) -> String {
+    let Some(code) = error.raw_os_error() else {
+        return error.to_string();
+    };
+    let mut buffer = vec![0u16; 2048];
+    let flags = windows_sys::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_FROM_SYSTEM
+        | windows_sys::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_IGNORE_INSERTS;
+    let length = unsafe {
+        FormatMessageW(
+            flags,
+            ptr::null(),
+            code as u32,
+            GetUserDefaultUILanguage() as u32,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            ptr::null(),
+        )
+    };
+    let length = if length == 0 {
+        unsafe {
+            FormatMessageW(
+                flags,
+                ptr::null(),
+                code as u32,
+                0,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                ptr::null(),
+            )
+        }
+    } else {
+        length
+    };
+    if length == 0 {
+        return error.to_string();
+    }
+    String::from_utf16_lossy(&buffer[..length as usize])
+        .trim_end_matches(['\r', '\n'])
+        .to_owned()
 }
 
 fn open_hook_stdio_file(
@@ -2776,7 +3103,6 @@ fn open_hook_stdio_file(
     let sharing = read_reg_dword(service, &format!("{setting}ShareMode"), 3)?;
     let attributes = read_reg_dword(service, &format!("{setting}FlagsAndAttributes"), 128)?;
     let file = OpenOptions::new()
-        .write(true)
         .append(true)
         .share_mode(sharing)
         .attributes(attributes)
@@ -2844,32 +3170,43 @@ fn rotate_log_file(
     force: bool,
     copy_and_truncate: bool,
     live_handle: bool,
-) -> Result<Option<std::path::PathBuf>, String> {
+) -> Result<Option<std::path::PathBuf>, RotationFailure> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(RotationFailure::from_io("CreateFile()", path, &error)),
     };
-    let modified = metadata.modified().map_err(|error| error.to_string())?;
+    let modified = metadata
+        .modified()
+        .map_err(|error| RotationFailure::from_io("GetFileInformationByHandle()", path, &error))?;
     let age = modified.elapsed().unwrap_or_default();
     if !log_rotation_due(metadata.len(), age, minimum_age, minimum_size, force) {
         return Ok(None);
     }
-    let rotated = rotated_log_path(Path::new(path), modified)
-        .ok_or_else(|| format!("could not create rotated name for {path}"))?;
+    let rotated = rotated_log_path(Path::new(path), modified).ok_or_else(|| {
+        RotationFailure::from_message(
+            "rotated_filename()",
+            path,
+            "could not create rotated filename",
+        )
+    })?;
     if copy_and_truncate || live_handle {
-        fs::copy(path, &rotated).map_err(|error| format!("unable to copy {path}: {error}"))?;
+        fs::copy(path, &rotated).map_err(|error| {
+            RotationFailure::from_io("CopyFile()", &rotated.to_string_lossy(), &error)
+        })?;
         if !delay.is_zero() {
             thread::sleep(delay);
         }
         let file = OpenOptions::new()
             .write(true)
             .open(path)
-            .map_err(|error| format!("unable to reopen {path}: {error}"))?;
+            .map_err(|error| RotationFailure::from_io("CreateFile()", path, &error))?;
         file.set_len(0)
-            .map_err(|error| format!("unable to truncate {path}: {error}"))?;
+            .map_err(|error| RotationFailure::from_io("SetEndOfFile()", path, &error))?;
     } else {
-        fs::rename(path, &rotated).map_err(|error| format!("unable to rename {path}: {error}"))?;
+        fs::rename(path, &rotated).map_err(|error| {
+            RotationFailure::from_io("MoveFile()", &rotated.to_string_lossy(), &error)
+        })?;
     }
     Ok(Some(rotated))
 }
@@ -2879,6 +3216,20 @@ fn report_rotation_event(service: &str, path: &str, rotated: &std::path::Path) {
         windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
         EVENT_ROTATED,
         &[service, path, &rotated.to_string_lossy()],
+    );
+}
+
+fn report_rotation_failure(service: &str, path: &str, error: &RotationFailure) {
+    report_event(
+        EVENTLOG_ERROR_TYPE,
+        EVENT_ROTATE_FILE_FAILED,
+        &[
+            service,
+            path,
+            error.operation,
+            &error.target,
+            &error.message,
+        ],
     );
 }
 
@@ -3040,7 +3391,7 @@ fn read_exit_rule(service: &str, exit_code: Option<u32>) -> Result<Option<ExitAc
         }
         return Err(registry_error(code));
     }
-    let mut data = vec![0u16; (bytes as usize + 1) / 2];
+    let mut data = vec![0u16; (bytes as usize).div_ceil(2)];
     let code = unsafe {
         RegQueryValueExW(
             key,
@@ -3271,6 +3622,8 @@ fn hook_deadline_ms(event: &str, action: &str) -> u64 {
     }
 }
 
+// Each argument is an independent part of NSSM's hook ABI and wait policy.
+#[expect(clippy::too_many_arguments)]
 fn invoke_hook(
     service: &str,
     event: &str,
@@ -3281,7 +3634,18 @@ fn invoke_hook(
     synchronous: bool,
     cancel_on_stop: bool,
 ) -> Result<Option<u32>, String> {
-    let Some(command_line) = read_hook(service, &format!("{event}/{action}"))? else {
+    let command_line = match read_hook(service, &format!("{event}/{action}")) {
+        Ok(command_line) => command_line,
+        Err(error) => {
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_GET_HOOK_FAILED,
+                &[event, action, service],
+            );
+            return Err(error);
+        }
+    };
+    let Some(command_line) = command_line else {
         return Ok(None);
     };
     if command_line.is_empty() {
@@ -3395,9 +3759,18 @@ fn invoke_hook(
             command.stderr(stderr);
         }
     }
-    let mut hook = command
-        .spawn()
-        .map_err(|error| format!("unable to launch {event}/{action} hook: {error}"))?;
+    let mut hook = match command.spawn() {
+        Ok(hook) => hook,
+        Err(error) => {
+            let error_message = windows_error_message(&error);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_HOOK_CREATEPROCESS_FAILED,
+                &[event, action, service, &command_line, &error_message],
+            );
+            return Err(format!("unable to launch {event}/{action} hook: {error}"));
+        }
+    };
     if !synchronous {
         reap_async_hooks();
         if let Ok(mut hooks) = ASYNC_HOOKS.lock() {
@@ -3547,6 +3920,19 @@ unsafe extern "system" fn service_handler(
     NO_ERROR
 }
 
+struct ServiceConfig {
+    app: String,
+    args: Vec<String>,
+    directory: String,
+    app_environment: Option<Vec<String>>,
+    extra_environment: Vec<String>,
+    child_environment: Vec<String>,
+    affinity: Option<String>,
+    priority: u32,
+    no_console: bool,
+    kill_process_tree: bool,
+}
+
 unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::PWSTR) {
     if argc == 0 || argv.is_null() {
         return;
@@ -3581,30 +3967,97 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         )
     };
     if handle.is_null() {
+        let error_message = windows_error_message(&io::Error::last_os_error());
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_REGISTER_HANDLER_FAILED,
+            &[&error_message],
+        );
         return;
     }
     SERVICE_STATUS_HANDLE_VALUE.store(handle as isize, Ordering::SeqCst);
     report_service_control(&service_name, 0, true);
     set_status(SERVICE_START_PENDING, 0, 10_000);
     let _ = ensure_default_exit_action(&service_name);
-    let config = (|| -> Result<(String, Vec<String>, Option<String>, Option<Vec<String>>, Vec<String>, Vec<String>, Option<String>, u32, bool, bool), String> {
-        let inherited: Vec<String> = std::env::vars_os().map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy())).collect();
+    let config = (|| -> Result<ServiceConfig, String> {
+        let inherited: Vec<String> = std::env::vars_os()
+            .map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy()))
+            .collect();
         let app_environment = read_multi_parameter(&service_name, "AppEnvironment")?;
-        let extra_environment = read_multi_parameter(&service_name, "AppEnvironmentExtra")?.unwrap_or_default();
-        let child_environment = compose_child_environment(&inherited, app_environment.as_deref(), &extra_environment).map_err(|error| error.to_string())?;
-        let app = expand_environment_value(&read_reg_string(&service_name, "Application")?, &child_environment);
-        let args = read_optional_reg_string(&service_name, "AppParameters")?
-            .map(|value| split_windows_args(&expand_environment_value(&value, &child_environment)))
-            .unwrap_or_default();
-        let directory = read_optional_reg_string(&service_name, "AppDirectory")?
-            .map(|value| expand_environment_value(&value, &child_environment));
+        let extra_environment =
+            read_multi_parameter(&service_name, "AppEnvironmentExtra")?.unwrap_or_default();
+        let child_environment =
+            compose_child_environment(&inherited, app_environment.as_deref(), &extra_environment)
+                .map_err(|error| error.to_string())?;
+        let app = expand_environment_value(
+            &read_reg_string(&service_name, "Application")?,
+            &child_environment,
+        );
+        let args = match read_optional_reg_string(&service_name, "AppParameters") {
+            Ok(Some(value)) => {
+                split_windows_args(&expand_environment_value(&value, &child_environment))
+            }
+            Ok(None) | Err(_) => {
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                    EVENT_NO_FLAGS,
+                    &["AppParameters", &service_name, &app],
+                );
+                Vec::new()
+            }
+        };
+        let configured_directory = read_optional_reg_string(&service_name, "AppDirectory")
+            .ok()
+            .flatten()
+            .map(|value| expand_environment_value(&value, &child_environment))
+            .filter(|value| !value.is_empty());
+        let directory = match configured_directory {
+            Some(value) => value,
+            None => {
+                let fallback = Path::new(&app)
+                    .parent()
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .or_else(windows_directory);
+                let Some(value) = fallback else {
+                    report_event(
+                        EVENTLOG_ERROR_TYPE,
+                        EVENT_DIRECTORY_FAILED,
+                        &["AppDirectory", &service_name],
+                    );
+                    report_event(
+                        EVENTLOG_ERROR_TYPE,
+                        EVENT_GET_PARAMETERS_FAILED,
+                        &[&service_name],
+                    );
+                    return Err("could not resolve AppDirectory".to_owned());
+                };
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                    EVENT_NO_DIRECTORY,
+                    &["AppDirectory", &service_name, &value],
+                );
+                value
+            }
+        };
         let affinity = read_optional_reg_string(&service_name, "AppAffinity")?;
         let priority = read_reg_dword(&service_name, "AppPriority", 0x20)?;
         let no_console = read_reg_dword(&service_name, "AppNoConsole", 0)? != 0;
         let kill_process_tree = read_reg_dword(&service_name, "AppKillProcessTree", 1)? != 0;
-        Ok((app, args, directory, app_environment, extra_environment, child_environment, affinity, priority, no_console, kill_process_tree))
+        Ok(ServiceConfig {
+            app,
+            args,
+            directory,
+            app_environment,
+            extra_environment,
+            child_environment,
+            affinity,
+            priority,
+            no_console,
+            kill_process_tree,
+        })
     })();
-    let (
+    let ServiceConfig {
         app,
         args,
         directory,
@@ -3615,7 +4068,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         priority,
         no_console,
         kill_process_tree,
-    ) = match config {
+    } = match config {
         Ok(config) => config,
         Err(_) => {
             set_status(SERVICE_STOPPED, 2, 0);
@@ -3671,16 +4124,27 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     let mut throttle = nssm_rs::RestartThrottle::new(restart_delay_ms);
     let mut stop_hook_invoked = false;
     let mut stop_process_handled = false;
+    let mut application_started = false;
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
         HOOK_START_REQUESTED_COUNT.fetch_add(1, Ordering::SeqCst);
         set_status(SERVICE_START_PENDING, 0, 10_000);
+        let same_output_path = stdout_path
+            .as_deref()
+            .zip(stderr_path.as_deref())
+            .is_some_and(|(stdout, stderr)| windows_paths_equal(stdout, stderr));
         if rotate_files {
-            for (path, copy) in [
+            for (index, (path, copy)) in [
                 (stdout_path.as_deref(), stdout_copy_and_truncate),
                 (stderr_path.as_deref(), stderr_copy_and_truncate),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if same_output_path && index == 1 {
+                    continue;
+                }
                 if let Some(path) = path {
-                    if let Ok(Some(rotated)) = rotate_log_file(
+                    match rotate_log_file(
                         path,
                         Duration::from_secs(rotate_seconds as u64),
                         rotate_size,
@@ -3689,7 +4153,9 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                         copy,
                         false,
                     ) {
-                        report_rotation_event(&service_name, path, &rotated);
+                        Ok(Some(rotated)) => report_rotation_event(&service_name, path, &rotated),
+                        Ok(None) => {}
+                        Err(error) => report_rotation_failure(&service_name, path, &error),
                     }
                 }
             }
@@ -3697,27 +4163,112 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         let redirected_stdin =
             match open_stdio_file(&service_name, "AppStdin", &child_environment, true) {
                 Ok(file) => file.map(Stdio::from).unwrap_or_else(Stdio::null),
-                Err(_) => {
-                    set_status(SERVICE_STOPPED, 2, 0);
+                Err(error) => {
+                    report_stdio_setup_failure(&service_name, &app, &error);
+                    if application_started {
+                        retry_failed_restart_launch(
+                            &service_name,
+                            &app,
+                            throttle_ms,
+                            restart_delay_ms,
+                            &mut throttle,
+                        );
+                        continue;
+                    }
+                    finish_async_hooks();
+                    set_status_with_service_exit(
+                        SERVICE_STOPPED,
+                        windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                        4,
+                        0,
+                    );
                     return;
                 }
             };
         let mut stdout_file =
             match open_stdio_file(&service_name, "AppStdout", &child_environment, false) {
                 Ok(file) => file,
-                Err(_) => {
-                    set_status(SERVICE_STOPPED, 2, 0);
+                Err(error) => {
+                    report_stdio_setup_failure(&service_name, &app, &error);
+                    if application_started {
+                        retry_failed_restart_launch(
+                            &service_name,
+                            &app,
+                            throttle_ms,
+                            restart_delay_ms,
+                            &mut throttle,
+                        );
+                        continue;
+                    }
+                    finish_async_hooks();
+                    set_status_with_service_exit(
+                        SERVICE_STOPPED,
+                        windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                        4,
+                        0,
+                    );
                     return;
                 }
             };
-        let mut stderr_file =
+        let mut stderr_file = if same_output_path {
+            match stdout_file.as_ref() {
+                Some(file) => match file.try_clone() {
+                    Ok(file) => Some(file),
+                    Err(error) => {
+                        let error = StdioFileError::Duplicate {
+                            source: "stdout",
+                            destination: "stderr",
+                            error,
+                        };
+                        report_stdio_setup_failure(&service_name, &app, &error);
+                        if application_started {
+                            retry_failed_restart_launch(
+                                &service_name,
+                                &app,
+                                throttle_ms,
+                                restart_delay_ms,
+                                &mut throttle,
+                            );
+                            continue;
+                        }
+                        finish_async_hooks();
+                        set_status_with_service_exit(
+                            SERVICE_STOPPED,
+                            windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                            4,
+                            0,
+                        );
+                        return;
+                    }
+                },
+                None => None,
+            }
+        } else {
             match open_stdio_file(&service_name, "AppStderr", &child_environment, false) {
                 Ok(file) => file,
-                Err(_) => {
-                    set_status(SERVICE_STOPPED, 2, 0);
+                Err(error) => {
+                    report_stdio_setup_failure(&service_name, &app, &error);
+                    if application_started {
+                        retry_failed_restart_launch(
+                            &service_name,
+                            &app,
+                            throttle_ms,
+                            restart_delay_ms,
+                            &mut throttle,
+                        );
+                        continue;
+                    }
+                    finish_async_hooks();
+                    set_status_with_service_exit(
+                        SERVICE_STOPPED,
+                        windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                        4,
+                        0,
+                    );
                     return;
                 }
-            };
+            }
+        };
         if STOP_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
@@ -3759,37 +4310,57 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         if STOP_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
-        let stdout_destination = if (timestamp_log || rotate_online) && stdout_path.is_some() {
+        let (stdout_destination, stderr_destination) = if (timestamp_log || rotate_online)
+            && same_output_path
+        {
             match (stdout_path.as_deref(), stdout_file.take()) {
                 (Some(path), Some(file)) => {
                     match LogDestination::new(&service_name, "AppStdout", path.to_owned(), file) {
-                        Ok(destination) => Some(destination),
+                        Ok(destination) => (Some(destination), None),
                         Err(_) => {
                             set_status(SERVICE_STOPPED, 2, 0);
                             return;
                         }
                     }
                 }
-                _ => None,
+                _ => (None, None),
             }
         } else {
-            None
-        };
-        let stderr_destination = if (timestamp_log || rotate_online) && stderr_path.is_some() {
-            match (stderr_path.as_deref(), stderr_file.take()) {
-                (Some(path), Some(file)) => {
-                    match LogDestination::new(&service_name, "AppStderr", path.to_owned(), file) {
-                        Ok(destination) => Some(destination),
-                        Err(_) => {
-                            set_status(SERVICE_STOPPED, 2, 0);
-                            return;
+            let stdout_destination = if (timestamp_log || rotate_online) && stdout_path.is_some() {
+                match (stdout_path.as_deref(), stdout_file.take()) {
+                    (Some(path), Some(file)) => {
+                        match LogDestination::new(&service_name, "AppStdout", path.to_owned(), file)
+                        {
+                            Ok(destination) => Some(destination),
+                            Err(_) => {
+                                set_status(SERVICE_STOPPED, 2, 0);
+                                return;
+                            }
                         }
                     }
+                    _ => None,
                 }
-                _ => None,
-            }
-        } else {
-            None
+            } else {
+                None
+            };
+            let stderr_destination = if (timestamp_log || rotate_online) && stderr_path.is_some() {
+                match (stderr_path.as_deref(), stderr_file.take()) {
+                    (Some(path), Some(file)) => {
+                        match LogDestination::new(&service_name, "AppStderr", path.to_owned(), file)
+                        {
+                            Ok(destination) => Some(destination),
+                            Err(_) => {
+                                set_status(SERVICE_STOPPED, 2, 0);
+                                return;
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            (stdout_destination, stderr_destination)
         };
         let timestamp_stdout = timestamp_log && stdout_destination.is_some();
         let timestamp_stderr = timestamp_log && stderr_destination.is_some();
@@ -3829,12 +4400,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             }
             command.creation_flags(flags);
         }
-        let default_dir = Path::new(&app)
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty());
-        if let Some(dir) = directory.as_deref().map(Path::new).or(default_dir) {
-            command.current_dir(dir);
-        }
+        command.current_dir(&directory);
         if app_environment.is_some() {
             command.env_clear();
             for entry in &child_environment {
@@ -3844,21 +4410,38 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             }
         } else if !extra_environment.is_empty() {
             for change in &extra_environment {
-                if let Some((key, _)) = change.split_once('=') {
-                    if let Some(value) = child_environment.iter().rev().find_map(|entry| {
+                if let Some((key, _)) = change.split_once('=')
+                    && let Some(value) = child_environment.iter().rev().find_map(|entry| {
                         entry
                             .split_once('=')
                             .filter(|(name, _)| name.eq_ignore_ascii_case(key))
                             .map(|(_, value)| value)
-                    }) {
-                        command.env(key, value);
-                    }
+                    })
+                {
+                    command.env(key, value);
                 }
             }
         }
         let mut process = match command.spawn() {
             Ok(process) => process,
             Err(error) => {
+                match nssm_rs::launch_failure_disposition(
+                    application_started,
+                    STOP_REQUESTED.load(Ordering::SeqCst),
+                ) {
+                    LaunchFailureDisposition::StopRequested => break,
+                    LaunchFailureDisposition::Retry => {
+                        retry_failed_restart_launch(
+                            &service_name,
+                            &app,
+                            throttle_ms,
+                            restart_delay_ms,
+                            &mut throttle,
+                        );
+                        continue;
+                    }
+                    LaunchFailureDisposition::StopService => {}
+                }
                 let error = error.to_string();
                 report_event(
                     EVENTLOG_ERROR_TYPE,
@@ -3884,21 +4467,21 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             }
         };
         let mut logger_threads = Vec::new();
-        if let Some(destination) = stdout_destination.as_ref() {
-            if let Some(pipe) = process.stdout.take() {
-                let destination = destination.clone();
-                logger_threads.push(thread::spawn(move || {
-                    log_stream(pipe, destination, timestamp_stdout)
-                }));
-            }
+        if let Some(destination) = stdout_destination.as_ref()
+            && let Some(pipe) = process.stdout.take()
+        {
+            let destination = destination.clone();
+            logger_threads.push(thread::spawn(move || {
+                log_stream(pipe, destination, timestamp_stdout)
+            }));
         }
-        if let Some(destination) = stderr_destination.as_ref() {
-            if let Some(pipe) = process.stderr.take() {
-                let destination = destination.clone();
-                logger_threads.push(thread::spawn(move || {
-                    log_stream(pipe, destination, timestamp_stderr)
-                }));
-            }
+        if let Some(destination) = stderr_destination.as_ref()
+            && let Some(pipe) = process.stderr.take()
+        {
+            let destination = destination.clone();
+            logger_threads.push(thread::spawn(move || {
+                log_stream(pipe, destination, timestamp_stderr)
+            }));
         }
         let launched = match assign_to_kill_on_close_job(process, kill_process_tree) {
             Ok(launched) => launched,
@@ -3907,9 +4490,12 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 return;
             }
         };
+        application_started = true;
         if let Ok(mut child) = CHILD_PROCESS.lock() {
             *child = Some(launched);
         }
+        throttle.mark_started();
+        HOOK_THROTTLE_COUNT.store(throttle.counter(), Ordering::SeqCst);
         HOOK_START_COUNT.fetch_add(1, Ordering::SeqCst);
         HOOK_APPLICATION_START_MS.store(unix_time_millis(), Ordering::SeqCst);
         let app_pid = CHILD_PROCESS
@@ -3926,32 +4512,27 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             false,
             false,
         );
-        if let Ok(child) = CHILD_PROCESS.lock() {
-            if let Some(child) = child.as_ref() {
-                let process = child.child.as_raw_handle() as HANDLE;
-                unsafe {
-                    SetPriorityClass(process, priority);
-                }
-                if let Some(affinity) = affinity.as_deref() {
-                    if let Ok(mask) = parse_cpu_affinity(affinity) {
-                        if mask != 0 {
-                            let mut process_mask = 0usize;
-                            let mut system_mask = 0usize;
-                            if unsafe {
-                                GetProcessAffinityMask(
-                                    GetCurrentProcess(),
-                                    &mut process_mask,
-                                    &mut system_mask,
-                                )
-                            } != 0
-                            {
-                                let effective = mask as usize & system_mask;
-                                if effective != 0 {
-                                    unsafe {
-                                        SetProcessAffinityMask(process, effective);
-                                    }
-                                }
-                            }
+        if let Ok(child) = CHILD_PROCESS.lock()
+            && let Some(child) = child.as_ref()
+        {
+            let process = child.child.as_raw_handle() as HANDLE;
+            unsafe {
+                SetPriorityClass(process, priority);
+            }
+            if let Some(affinity) = affinity.as_deref()
+                && let Ok(mask) = parse_cpu_affinity(affinity)
+                && mask != 0
+            {
+                let mut process_mask = 0usize;
+                let mut system_mask = 0usize;
+                if unsafe {
+                    GetProcessAffinityMask(GetCurrentProcess(), &mut process_mask, &mut system_mask)
+                } != 0
+                {
+                    let effective = mask as usize & system_mask;
+                    if effective != 0 {
+                        unsafe {
+                            SetProcessAffinityMask(process, effective);
                         }
                     }
                 }
@@ -3966,12 +4547,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         report_event(
             windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
             EVENT_STARTED_SERVICE,
-            &[
-                &app,
-                &parameters,
-                &service_name,
-                directory.as_deref().unwrap_or(""),
-            ],
+            &[&app, &parameters, &service_name, &directory],
         );
         let mut child_exit_code = 1;
         let mut rotation_check = Instant::now();
@@ -3998,7 +4574,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                     true,
                     false,
                 );
-                for (destination, path, copy) in [
+                for (index, (destination, path, copy)) in [
                     (
                         stdout_destination.as_ref(),
                         stdout_path.as_deref(),
@@ -4009,7 +4585,13 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                         stderr_path.as_deref(),
                         stderr_copy_and_truncate,
                     ),
-                ] {
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if same_output_path && index == 1 {
+                        continue;
+                    }
                     let rotation = if let Some(destination) = destination {
                         destination.rotate(
                             Duration::from_secs(rotate_seconds as u64),
@@ -4031,8 +4613,21 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                     } else {
                         continue;
                     };
-                    if let (Some(path), Ok(Some(rotated))) = (path, rotation) {
-                        report_rotation_event(&service_name, path, &rotated);
+                    match rotation {
+                        Ok(Some(rotated)) => {
+                            if let Some(path) = path {
+                                report_rotation_event(&service_name, path, &rotated);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let active_path = destination
+                                .map(|destination| destination.path.as_str())
+                                .or(path);
+                            if let Some(path) = active_path {
+                                report_rotation_failure(&service_name, path, &error);
+                            }
+                        }
                     }
                 }
                 let _ = invoke_hook(
@@ -4080,18 +4675,18 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             );
             stop_hook_invoked = true;
         }
-        if let Ok(mut child) = CHILD_PROCESS.lock() {
-            if let Some(mut proc) = child.take() {
-                let stop_requested = STOP_REQUESTED.load(Ordering::SeqCst);
-                if stop_requested {
-                    stop_process_handled = true;
-                    let _ = stop_child(&service_name, &app, &mut proc, no_console);
-                }
-                if let Ok(status) = proc.child.wait() {
-                    if STOP_REQUESTED.load(Ordering::SeqCst) {
-                        child_exit_code = status.code().unwrap_or(1) as u32;
-                    }
-                }
+        if let Ok(mut child) = CHILD_PROCESS.lock()
+            && let Some(mut proc) = child.take()
+        {
+            let stop_requested = STOP_REQUESTED.load(Ordering::SeqCst);
+            if stop_requested {
+                stop_process_handled = true;
+                let _ = stop_child(&service_name, &app, &mut proc, no_console);
+            }
+            if let Ok(status) = proc.child.wait()
+                && STOP_REQUESTED.load(Ordering::SeqCst)
+            {
+                child_exit_code = status.code().unwrap_or(1) as u32;
             }
         }
         if logger_threads
@@ -4199,38 +4794,13 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             }
         }
         let delay = throttle.after_exit();
-        let throttle_count = throttle.counter();
-        HOOK_THROTTLE_COUNT.store(throttle_count, Ordering::SeqCst);
-        if delay > 0 {
-            let backoff_ms = nssm_rs::restart_wait_ms(throttle_count.saturating_sub(1), 0);
-            if restart_delay_ms > backoff_ms {
-                report_event(
-                    windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
-                    EVENT_RESTART_DELAY,
-                    &[&service_name, &delay.to_string()],
-                );
-            } else {
-                report_event(
-                    windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
-                    EVENT_THROTTLED,
-                    &[&service_name, &throttle_ms.to_string(), &delay.to_string()],
-                );
-            }
-            CONTINUE_REQUESTED.store(false, Ordering::SeqCst);
-            set_status(SERVICE_PAUSED, 0, delay);
-            let deadline = Instant::now() + Duration::from_millis(delay as u64);
-            while !STOP_REQUESTED.load(Ordering::SeqCst) && Instant::now() < deadline {
-                if CONTINUE_REQUESTED.swap(false, Ordering::SeqCst) {
-                    throttle.mark_stable();
-                    HOOK_THROTTLE_COUNT.store(0, Ordering::SeqCst);
-                    break;
-                }
-                thread::sleep(
-                    Duration::from_millis(25)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                );
-            }
-        }
+        wait_for_restart_delay(
+            &service_name,
+            delay,
+            throttle_ms,
+            restart_delay_ms,
+            &mut throttle,
+        );
     }
     if STOP_REQUESTED.load(Ordering::SeqCst) && !stop_process_handled {
         report_event(
@@ -4347,6 +4917,7 @@ fn elevate(arguments: &[String]) -> u8 {
     let parameters = wide(OsStr::new(&parameters));
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
     info.lpVerb = verb.as_ptr();
     info.lpFile = executable.as_ptr();
     info.lpParameters = parameters.as_ptr();
@@ -4355,16 +4926,29 @@ fn elevate(arguments: &[String]) -> u8 {
         cli_eprintln!("nssm-rs: Windows refused the administrator elevation request");
         100
     } else {
-        0
+        if info.hProcess.is_null() {
+            cli_eprintln!("nssm-rs: Windows did not return the elevated process handle");
+            return 100;
+        }
+        let wait_result = unsafe {
+            WaitForSingleObject(
+                info.hProcess,
+                windows_sys::Win32::System::Threading::INFINITE,
+            )
+        };
+        let mut exit_code = 1;
+        let got_exit_code = wait_result == WAIT_OBJECT_0
+            && unsafe { GetExitCodeProcess(info.hProcess, &mut exit_code) } != 0;
+        unsafe { CloseHandle(info.hProcess) };
+        if !got_exit_code {
+            cli_eprintln!("nssm-rs: unable to read the elevated command's exit status");
+            return 100;
+        }
+        u8::try_from(exit_code).unwrap_or(100)
     }
 }
 
 pub fn execute(command: Command) -> Result<u8, String> {
-    if !is_administrator()
-        && let Some(arguments) = elevation_arguments(&command)
-    {
-        return Ok(elevate(&arguments));
-    }
     let service = match &command {
         Command::Start(service)
         | Command::Stop(service)
@@ -4379,7 +4963,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
         | Command::Unset { service, .. }
         | Command::Remove { service, .. }
         | Command::Dump { service, .. } => Some(service.as_str()),
-        Command::Processes(services) => services.first().map(String::as_str),
+        Command::Processes(_) => None,
         Command::Install { .. }
         | Command::List { .. }
         | Command::StatusCode(_)
@@ -4389,6 +4973,11 @@ pub fn execute(command: Command) -> Result<u8, String> {
     if let Some(service) = service.filter(|service| service_is_missing(service)) {
         cli_eprintln!("nssm-rs: service '{service}' does not exist\r");
         return Ok(3);
+    }
+    if !is_administrator()
+        && let Some(arguments) = elevation_arguments(&command)
+    {
+        return Ok(elevate(&arguments));
     }
     let managed_parameter = match &command {
         Command::Get {
@@ -4446,6 +5035,13 @@ pub fn execute(command: Command) -> Result<u8, String> {
             }
         },
         command => match command {
+            Command::Processes(services) => match processes(&services) {
+                Ok(()) => Ok(0),
+                Err(error) => {
+                    cli_eprintln!("{error}\r");
+                    Ok(1)
+                }
+            },
             Command::Get {
                 service,
                 parameter,
@@ -4551,6 +5147,63 @@ mod tests {
         priority_name, priority_value, process_belongs_to_service_lifetime, quote_dump_arg,
         service_control_event, service_type_name, valid_hook,
     };
+
+    struct TestDirectory(std::path::PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time is after the Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "nssm-rs-rotation-test-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).expect("temporary test directory is created");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn rotation_collision_returns_move_operation_and_preserves_active_log() {
+        let directory = TestDirectory::new();
+        let active = directory.0.join("active.log");
+        std::fs::write(&active, "active log data").expect("active log is written");
+        let modified = std::fs::metadata(&active)
+            .and_then(|metadata| metadata.modified())
+            .expect("active log modification time is readable");
+        let rotated = super::rotated_log_path(&active, modified)
+            .expect("rotation target is generated from the active log timestamp");
+        std::fs::create_dir(&rotated).expect("rotation target collision is created");
+        let active = active.to_string_lossy().into_owned();
+
+        let error = super::rotate_log_file(
+            &active,
+            std::time::Duration::ZERO,
+            0,
+            std::time::Duration::ZERO,
+            false,
+            false,
+            false,
+        )
+        .expect_err("renaming onto an existing directory fails");
+
+        assert_eq!(error.operation, "MoveFile()");
+        assert_eq!(error.target, rotated.to_string_lossy());
+        assert!(!error.message.is_empty());
+        assert!(rotated.is_dir(), "collision target is left intact");
+        assert_eq!(
+            std::fs::read_to_string(&active).expect("active log remains available"),
+            "active log data"
+        );
+    }
 
     #[test]
     fn hook_deadlines_match_service_status_and_general_hook_limits() {

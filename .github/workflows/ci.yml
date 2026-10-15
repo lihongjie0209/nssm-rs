@@ -14,6 +14,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - name: Run Windows unit and CLI tests
         if: runner.os == 'Windows'
         run: cargo test --lib --bins --test cli_compat --test cli_process
@@ -27,4 +28,5 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           rustup target add x86_64-pc-windows-gnu
+          cargo clippy --target x86_64-pc-windows-gnu --all-targets --locked -- -D warnings
           cargo check --target x86_64-pc-windows-gnu

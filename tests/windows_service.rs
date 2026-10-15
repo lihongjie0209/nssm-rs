@@ -927,6 +927,22 @@ fn missing_service_commands_return_nssm_service_lookup_status() {
 }
 
 #[test]
+fn processes_on_missing_service_returns_reference_command_status() {
+    let service = unique_service_name();
+    let result = cli(&["processes", &service]);
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "processes should return NSSM's command failure status"
+    );
+    assert!(result.stdout.is_empty(), "missing service produced stdout");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr).trim(),
+        "Can't open service!"
+    );
+}
+
+#[test]
 fn managed_settings_on_native_services_return_nssm_compatibility_error() {
     let service_type = cli(&["get", "Schedule", "Type"]);
     assert!(service_type.status.success());
@@ -1375,6 +1391,151 @@ fn remove_prompts_and_honors_negative_and_positive_confirmation() {
 }
 
 #[test]
+fn missing_parameters_and_directory_log_warnings_and_use_reference_fallbacks() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let application = format!("{windows}\\System32\\whoami.exe");
+    let fallback_directory = format!("{windows}\\System32");
+    let installed = cli(&["install", &service, &application]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    for setting in ["AppParameters", "AppDirectory"] {
+        let reset = cli(&["reset", &service, setting]);
+        assert!(
+            reset.status.success(),
+            "reset {setting} failed: {}",
+            String::from_utf8_lossy(&reset.stderr)
+        );
+    }
+    assert!(
+        cli(&["set", &service, "AppExit", "0", "Exit"])
+            .status
+            .success()
+    );
+
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "service start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1029,1030)}} -MaxEvents 200 -ErrorAction SilentlyContinue; $flags = $false; $directory = $false; foreach ($event in $events) {{ $p = $event.Properties; if ($event.Id -eq 1029 -and $p.Count -ge 3 -and $p[0].Value -eq 'AppParameters' -and $p[1].Value -eq '{service}' -and $p[2].Value -ieq '{application}') {{ $flags = $true }}; if ($event.Id -eq 1030 -and $p.Count -ge 3 -and $p[0].Value -eq 'AppDirectory' -and $p[1].Value -eq '{service}' -and $p[2].Value -ieq '{fallback_directory}') {{ $directory = $true }} }}; if ($flags -and $directory) {{ exit 0 }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&script),
+        "Application log contains 1029 and 1030 with the reference insertion values"
+    );
+    assert!(
+        wait_for_service_state(&service, "SERVICE_STOPPED"),
+        "whoami child should finish under the AppExit Exit policy"
+    );
+}
+
+#[test]
+fn missing_hook_executable_logs_event_and_does_not_abort_service_start() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let missing_hook = format!("{windows}\\System32\\nssm-rs-missing-hook.exe");
+    let installed = cli(&["install", &service, &command_prompt, "/c", "exit 0"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppEvents", "Start/Pre", &missing_hook])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "0", "Ignore"])
+            .status
+            .success()
+    );
+
+    let _ = cli(&["start", &service]);
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1080}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -ge 5 -and $event.Properties[0].Value -eq 'Start' -and $event.Properties[1].Value -eq 'Pre' -and $event.Properties[2].Value -eq '{service}' -and $event.Properties[3].Value -eq '{missing_hook}' -and $event.Properties[4].Value) {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&script),
+        "Application log contains event 1080 with Start/Pre, service, and missing hook path"
+    );
+    assert!(
+        wait_for_service_state(&service, "SERVICE_RUNNING"),
+        "a failed Start/Pre hook launch does not abort the service start"
+    );
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+}
+
+#[test]
+fn identical_stdout_and_stderr_paths_share_the_stdout_file_settings() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let output_path = std::env::temp_dir().join(format!("{service}_shared.log"));
+    let output_path = output_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![output_path.clone()]);
+    std::fs::write(&output_path, b"preserve-me\r\n").expect("seed shared output file");
+
+    let installed = cli(&[
+        "install",
+        &service,
+        &command_prompt,
+        "/c",
+        "echo child-output & echo child-error 1>&2",
+    ]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    for (setting, value) in [
+        ("AppStdout", output_path.clone()),
+        ("AppStderr", output_path.to_ascii_uppercase()),
+        ("AppStdoutCreationDisposition", "4".to_owned()),
+        ("AppStderrCreationDisposition", "2".to_owned()),
+        ("AppTimestampLog", "1".to_owned()),
+    ] {
+        let configured = cli(&["set", &service, setting, &value]);
+        assert!(
+            configured.status.success(),
+            "setting {setting} failed: {}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+    }
+    assert!(
+        cli(&["set", &service, "AppExit", "0", "Exit"])
+            .status
+            .success()
+    );
+
+    let _ = cli(&["start", &service]);
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    let output = std::fs::read_to_string(&output_path).expect("shared output file exists");
+    assert!(
+        output.contains("preserve-me")
+            && output.contains("child-output")
+            && output.contains("child-error"),
+        "NSSM applies stdout's OPEN_ALWAYS setting and routes both timestamped streams to one file: {output:?}"
+    );
+}
+
+#[test]
 fn redirects_child_stdout_and_stderr_to_configured_files() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
@@ -1598,7 +1759,7 @@ fn launches_unicode_application_path_and_preserves_windows_arguments() {
         .expect("console signal fixture is built");
     std::fs::copy(fixture, &application).expect("fixture is copied to unicode path");
     let capture_path = working_directory.join("参数输出.txt");
-    let captured_arguments = vec![
+    let captured_arguments = [
         "plain".to_owned(),
         "two words".to_owned(),
         "雪与火".to_owned(),
@@ -2375,6 +2536,128 @@ fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
 }
 
 #[test]
+fn failed_restart_launch_is_logged_and_retried_until_stopped() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let source = format!("{windows}\\System32\\cmd.exe");
+    let application = std::env::temp_dir().join(format!("{service}.exe"));
+    let unavailable = std::env::temp_dir().join(format!("{service}.missing.exe"));
+    let application = application.to_string_lossy().into_owned();
+    let unavailable = unavailable.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![application.clone(), unavailable.clone()]);
+    std::fs::copy(source, &application).expect("copy cmd.exe to disposable application path");
+
+    let installed = cli(&["install", &service, &application, "/c", "exit 23"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "23", "Restart"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppRestartDelay", "5000"])
+            .status
+            .success()
+    );
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut restart_delay_observed = false;
+    while Instant::now() < deadline {
+        let status = cli(&["status", &service]);
+        if status.status.success()
+            && String::from_utf8_lossy(&status.stdout).trim() == "SERVICE_PAUSED"
+        {
+            restart_delay_observed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        restart_delay_observed,
+        "first app exit entered restart delay"
+    );
+    std::fs::rename(&application, &unavailable)
+        .expect("make application unavailable during the configured restart delay");
+
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1007}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{application}' -and $event.Properties[1].Value -eq '{service}') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&script),
+        "Application log records event 1007 for the failed restart launch"
+    );
+    let active = cli(&["status", &service]);
+    assert!(
+        active.status.success()
+            && matches!(
+                String::from_utf8_lossy(&active.stdout).trim(),
+                "SERVICE_START_PENDING" | "SERVICE_PAUSED"
+            ),
+        "service remains in its retry lifecycle after failed restart: {}",
+        String::from_utf8_lossy(&active.stdout)
+    );
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "stop failed during restart retry: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+}
+
+#[test]
+fn stdio_file_creation_failure_logs_reference_events_and_stops_startup() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let missing_directory = std::env::temp_dir().join(format!("{service}_missing"));
+    let stdout_path = missing_directory
+        .join("stdout.log")
+        .to_string_lossy()
+        .into_owned();
+    let _files = FileCleanup(vec![stdout_path.clone()]);
+
+    let installed = cli(&["install", &service, &command_prompt, "/c", "exit 0"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let configured = cli(&["set", &service, "AppStdout", &stdout_path]);
+    assert!(
+        configured.status.success(),
+        "stdout configuration failed: {}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    let _ = cli(&["start", &service]);
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1006,1049,1051)}} -MaxEvents 300 -ErrorAction SilentlyContinue; $create = $false; $handles = $false; $start = $false; foreach ($event in $events) {{ if ($event.Id -eq 1049 -and $event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{stdout_path}') {{ $create = $true }}; if ($event.Id -eq 1051 -and $event.Properties.Count -ge 1 -and $event.Properties[0].Value -eq '{service}') {{ $handles = $true }}; if ($event.Id -eq 1006 -and $event.Properties.Count -ge 3 -and $event.Properties[0].Value -eq '{command_prompt}' -and $event.Properties[1].Value -eq '{service}' -and $event.Properties[2].Value -eq 4) {{ $start = $true }} }}; if ($create -and $handles -and $start) {{ exit 0 }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&script),
+        "Application log records CreateFile failure 1049, output setup failure 1051, and service start failure 1006 with exit code 4"
+    );
+    assert!(
+        !std::path::Path::new(&stdout_path).exists(),
+        "the service must not create the configured log beneath the missing directory"
+    );
+}
+
+#[test]
 fn ignore_and_exit_actions_have_distinct_service_lifecycles() {
     let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     let command_prompt = format!("{windows}\\System32\\cmd.exe");
@@ -2720,6 +3003,78 @@ fn startup_rotation_preserves_existing_log_and_creates_a_fresh_active_file() {
 }
 
 #[test]
+fn failed_startup_log_rotation_reports_reference_event_and_still_launches_child() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let log_path = std::env::temp_dir().join(format!("{service}_rotation_failure.log"));
+    let prefix = format!("{service}_rotation_failure-");
+    let log_path_string = log_path.to_string_lossy().into_owned();
+    let _log_cleanup = RotationCleanup {
+        active: log_path_string.clone(),
+        prefix,
+    };
+    std::fs::write(&log_path, "rotation collision marker\r\n")
+        .expect("existing output log is created");
+    let modified = std::fs::metadata(&log_path)
+        .and_then(|metadata| metadata.modified())
+        .expect("active log modification time is available");
+    let rotated_path =
+        nssm_rs::rotated_log_path(&log_path, modified).expect("rotated filename is generated");
+    std::fs::create_dir(&rotated_path).expect("rotation target collision is created");
+
+    let installed = cli(&[
+        "install",
+        &service,
+        &command_prompt,
+        "/c",
+        "echo child-started",
+    ]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    for (setting, value) in [
+        ("AppStdout", log_path_string.as_str()),
+        ("AppRotateFiles", "1"),
+    ] {
+        let configured = cli(&["set", &service, setting, value]);
+        assert!(
+            configured.status.success(),
+            "setting {setting} failed: {}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+    }
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+    let _ = cli(&["start", &service]);
+    assert!(
+        wait_for_service_state(&service, "SERVICE_STOPPED"),
+        "child did not finish after startup rotation failed"
+    );
+    assert!(
+        std::fs::read_to_string(&log_path).is_ok_and(|contents| contents.contains("child-started")),
+        "log rotation failure prevented application output"
+    );
+
+    let service_query = service.replace('\'', "''");
+    let active_query = log_path_string.replace('\'', "''");
+    let rotated_query = rotated_path.to_string_lossy().replace('\'', "''");
+    let event_script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1063}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ $p = $event.Properties; if ($p.Count -eq 5 -and $p[0].Value -eq '{service_query}' -and $p[1].Value -eq '{active_query}' -and $p[2].Value -eq 'MoveFile()' -and $p[3].Value -eq '{rotated_query}' -and $p[4].Value) {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event_script),
+        "Application log contains event 1063 with the failed rotation operation and paths"
+    );
+}
+
+#[test]
 fn rotate_command_moves_the_active_log_and_reopens_it() {
     verify_live_rotation(false);
 }
@@ -2861,14 +3216,18 @@ struct RotationCleanup {
 impl Drop for RotationCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.active);
-        if let Some(directory) = std::path::Path::new(&self.active).parent() {
-            if let Ok(entries) = directory.read_dir() {
-                for entry in entries.flatten() {
-                    if entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(&self.prefix)
-                    {
+        if let Some(directory) = std::path::Path::new(&self.active).parent()
+            && let Ok(entries) = directory.read_dir()
+        {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&self.prefix)
+                {
+                    if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    } else {
                         let _ = std::fs::remove_file(entry.path());
                     }
                 }

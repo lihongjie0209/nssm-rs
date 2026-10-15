@@ -505,6 +505,29 @@ pub enum ExitAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchFailureDisposition {
+    StopService,
+    Retry,
+    StopRequested,
+}
+
+/// Select the service lifecycle after a child process could not be created.
+/// A first launch failure fails service startup; a later failure belongs to
+/// an already active restart policy and should be retried unless stopped.
+pub fn launch_failure_disposition(
+    application_started: bool,
+    stop_requested: bool,
+) -> LaunchFailureDisposition {
+    if stop_requested {
+        LaunchFailureDisposition::StopRequested
+    } else if application_started {
+        LaunchFailureDisposition::Retry
+    } else {
+        LaunchFailureDisposition::StopService
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopMethod {
     Console,
     Window,
@@ -594,6 +617,14 @@ impl RestartThrottle {
     /// A child that survives the configured throttle window resets backoff.
     pub fn mark_stable(&mut self) {
         self.counter = 0;
+    }
+
+    /// Record the first launch after service start or a stable run. NSSM's
+    /// first `throttle_restart()` call increments the counter without waiting.
+    pub fn mark_started(&mut self) {
+        if self.counter == 0 {
+            self.counter = 1;
+        }
     }
 
     /// Return the delay before a retry, then advance the consecutive-failure count.
@@ -957,6 +988,26 @@ mod policy_tests {
     use super::*;
 
     #[test]
+    fn child_launch_failure_distinguishes_startup_restart_and_stop() {
+        assert_eq!(
+            launch_failure_disposition(false, false),
+            LaunchFailureDisposition::StopService
+        );
+        assert_eq!(
+            launch_failure_disposition(true, false),
+            LaunchFailureDisposition::Retry
+        );
+        assert_eq!(
+            launch_failure_disposition(true, true),
+            LaunchFailureDisposition::StopRequested
+        );
+        assert_eq!(
+            launch_failure_disposition(false, true),
+            LaunchFailureDisposition::StopRequested
+        );
+    }
+
+    #[test]
     fn explicit_exit_code_policy_overrides_default_and_tracks_fallback() {
         let rules = BTreeMap::from([(17, ExitAction::Ignore)]);
         assert_eq!(
@@ -1002,13 +1053,15 @@ mod policy_tests {
     #[test]
     fn a_stable_run_resets_backoff_and_fixed_delay_remains_a_floor() {
         let mut throttle = RestartThrottle::new(0);
-        assert_eq!(throttle.after_exit(), 0);
+        throttle.mark_started();
         assert_eq!(throttle.after_exit(), 2000);
         assert_eq!(throttle.after_exit(), 4000);
         throttle.mark_stable();
-        assert_eq!(throttle.after_exit(), 0);
+        throttle.mark_started();
+        assert_eq!(throttle.after_exit(), 2000);
 
         let mut delayed = RestartThrottle::new(5000);
+        delayed.mark_started();
         assert_eq!(delayed.after_exit(), 5000);
         assert_eq!(delayed.after_exit(), 5000);
     }
