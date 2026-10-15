@@ -96,7 +96,7 @@ function Assert-SettingValue($Result, [string] $Expected, [string] $Label) {
 
 function Compare-StringSetting([System.Collections.Generic.List[object]] $Results,
     [string] $Binary, [string] $Service, [string] $Name, [string] $Value,
-    [string] $Default, [string] $Subparameter = '', [switch] $SkipReset) {
+    [object] $Default, [string] $Subparameter = '', [switch] $SkipReset) {
     $setArguments = @('set', $Service, $Name)
     $getArguments = @('get', $Service, $Name)
     $resetArguments = @('reset', $Service, $Name)
@@ -205,12 +205,13 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
             @('get', $Service, $setting, 'NSSMR_PARITY') | Out-Null
     }
     foreach ($setting in @(
-        @{ Name = 'DisplayName'; Value = "$Service reference display name" },
-        @{ Name = 'Start'; Value = 'SERVICE_AUTO_START' },
-        @{ Name = 'Type'; Value = 'SERVICE_WIN32_OWN_PROCESS' },
-        @{ Name = 'DependOnService'; Value = 'RpcSs' }
+        @{ Name = 'DisplayName'; Value = "$Service reference display name"; Default = $Service },
+        @{ Name = 'Start'; Value = 'SERVICE_AUTO_START'; Default = 'SERVICE_DEMAND_START' },
+        @{ Name = 'Type'; Value = 'SERVICE_WIN32_OWN_PROCESS'; Default = 'SERVICE_WIN32_OWN_PROCESS' },
+        @{ Name = 'DependOnService'; Value = 'RpcSs'; Default = '' }
     )) {
-        Compare-StringSetting $results $Binary $Service $setting.Name $setting.Value $null
+        Compare-StringSetting $results $Binary $Service $setting.Name `
+            $setting.Value $setting.Default
     }
     Add-Result $results $Binary 'set Environment' `
         @('set', $Service, 'Environment', '+NSSMR_NATIVE=value') | Out-Null
