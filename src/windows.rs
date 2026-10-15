@@ -2732,7 +2732,7 @@ fn set_status(state: u32, exit_code: u32, wait_hint: u32) {
         dwServiceType: SERVICE_WIN32_OWN_PROCESS,
         dwCurrentState: state,
         dwControlsAccepted: match state {
-            SERVICE_RUNNING => {
+            SERVICE_RUNNING | SERVICE_START_PENDING => {
                 SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT
             }
             SERVICE_PAUSED | SERVICE_CONTINUE_PENDING => {
