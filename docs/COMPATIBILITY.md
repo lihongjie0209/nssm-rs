@@ -119,8 +119,10 @@ configuration readback, running state, wrapped process reporting, stop, removal
 and service disappearance. Live log rotation closes and moves the active file
 when CopyAndTruncate is disabled, or copies and truncates the same active file
 when enabled; Windows integration tests check backup data, continued output and
-active-file identity for both modes. Remaining acceptance scope includes full
-hook ABI compatibility, graceful-signal-specific shutdown fixtures, broader
-error-path coverage, and command-by-command parity against the pinned reference.
+active-file identity for both modes. The Windows suite also starts a console
+fixture under SCM and verifies it receives CTRL+C before termination fallback.
+Remaining acceptance scope includes window-close and thread-quit response
+fixtures, full hook ABI compatibility, broader error-path coverage, and
+command-by-command parity against the pinned reference.
 Do not call this a complete NSSM replacement or publish a stable release until
 each acceptance row has evidence.

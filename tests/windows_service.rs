@@ -362,6 +362,68 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
 }
 
 #[test]
+fn sends_ctrl_c_to_child_in_its_console_before_termination_fallback() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let marker = std::env::temp_dir().join(format!("{service}_signal.txt"));
+    let marker = marker.to_string_lossy().into_owned();
+    let started_marker = format!("{marker}.started");
+    let _files = FileCleanup(vec![marker.clone(), started_marker.clone()]);
+    let fixture = std::env::var_os("NSSM_R_TEST_FIXTURE")
+        .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
+        .expect("Cargo builds the console signal fixture");
+    let fixture = fixture.to_string_lossy().into_owned();
+    let installed = cli(&["install", &service, &fixture]);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    for (key, value) in [
+        ("NSSM_SIGNAL_MARKER", marker.as_str()),
+        ("NSSM_STARTED_MARKER", started_marker.as_str()),
+    ] {
+        let set_env = cli(&["set", &service, "Environment", &format!("+{key}={value}")]);
+        assert!(
+            set_env.status.success(),
+            "{}",
+            String::from_utf8_lossy(&set_env.stderr)
+        );
+    }
+    let set_skip = cli(&["set", &service, "AppStopMethodSkip", "6"]);
+    assert!(
+        set_skip.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set_skip.stderr)
+    );
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_RUNNING"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::path::Path::new(&started_marker).exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        std::path::Path::new(&started_marker).exists(),
+        "fixture starts with configured environment"
+    );
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("signal marker exists"),
+        "ctrl-c"
+    );
+}
+
+#[test]
 fn stopping_service_terminates_descendant_processes() {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0},

@@ -2321,6 +2321,9 @@ fn send_console_ctrl_c(process_id: u32) {
     unsafe {
         SetConsoleCtrlHandler(None, 1);
         GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
+        // Console control handlers run asynchronously. Keep the target console
+        // attached briefly so the event can be dispatched before detaching.
+        thread::sleep(Duration::from_millis(25));
         FreeConsole();
         SetConsoleCtrlHandler(None, 0);
     }
