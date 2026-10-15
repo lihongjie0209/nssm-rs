@@ -1998,17 +1998,12 @@ fn dump_managed_settings(executable: &str, source: &str, target: &str) -> Result
                 else {
                     continue;
                 };
-                for code in registry_names(key.0, false)? {
-                    // NSSM's dump command serializes only the default AppExit
-                    // action, even when code-specific actions are configured.
-                    if !code.is_empty() {
-                        continue;
-                    }
-                    if let Some((_, bytes)) = read_raw_value(key.0, None)? {
-                        let value = decode_wide(&bytes)?;
-                        let additional = if code.is_empty() { "Default" } else { &code };
-                        dump_set_line(executable, target, spec.name, Some(additional), &value);
-                    }
+                // NSSM's dump command serializes only the default AppExit
+                // action, even when code-specific actions are configured.
+                // The unnamed registry value is not returned by RegEnumValue.
+                if let Some((_, bytes)) = read_raw_value(key.0, None)? {
+                    let value = decode_wide(&bytes)?;
+                    dump_set_line(executable, target, spec.name, Some("Default"), &value);
                 }
             }
             SettingKind::Hook => {
