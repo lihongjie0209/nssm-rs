@@ -7,7 +7,9 @@ use std::{
 };
 
 fn cli(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nssm-r"))
+    let binary = std::env::var_os("NSSM_R_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-r").into());
+    Command::new(binary)
         .args(args)
         .output()
         .expect("nssm-r starts")

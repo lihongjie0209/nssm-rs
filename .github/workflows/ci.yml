@@ -14,10 +14,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
-      - name: Exercise a complete SCM install-start-stop-remove flow
+      - name: Run Windows unit and CLI tests
         if: runner.os == 'Windows'
-        run: cargo test --test windows_scm_smoke -- --nocapture
-      - run: cargo test --all-targets
+        run: cargo test --lib --bins --test cli_compat --test cli_process
+      - name: Run complete Windows service integration suite
+        if: runner.os == 'Windows'
+        run: cargo test --test windows_scm_smoke --test windows_service -- --nocapture --test-threads=1
+      - name: Run all tests on Linux
+        if: runner.os == 'Linux'
+        run: cargo test --all-targets
       - run: cargo build --release
       - if: runner.os == 'Linux'
         run: |

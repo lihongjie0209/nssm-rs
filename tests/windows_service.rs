@@ -12,14 +12,18 @@ use std::{
 static SERVICE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn cli(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nssm-r"))
+    let binary = std::env::var_os("NSSM_R_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-r").into());
+    Command::new(binary)
         .args(args)
         .output()
         .expect("nssm-r executable starts")
 }
 
 fn cli_with_input(args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nssm-r"))
+    let binary = std::env::var_os("NSSM_R_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-r").into());
+    let mut child = Command::new(binary)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -355,6 +359,100 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         "remove failed: {}",
         String::from_utf8_lossy(&removed.stderr)
     );
+}
+
+#[test]
+fn stopping_service_terminates_descendant_processes() {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0},
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    };
+
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let script_path = std::env::temp_dir().join(format!("{service}.ps1"));
+    let script_path = script_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![script_path.clone()]);
+    std::fs::write(
+        &script_path,
+        "$ping = Join-Path $env:WINDIR 'System32\\PING.EXE'\nStart-Process -FilePath $ping -ArgumentList '-t 127.0.0.1' -WindowStyle Hidden\n& $ping -t 127.0.0.1\n",
+    )
+    .expect("process tree fixture is written");
+    let installed = cli(&[
+        "install",
+        &service,
+        &powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        &script_path,
+    ]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_RUNNING"));
+
+    let mut process_handles = Vec::new();
+    let mut last_tree = String::new();
+    for _ in 0..100 {
+        let tree = cli(&["processes", &service]);
+        assert!(
+            tree.status.success(),
+            "process enumeration failed: {}",
+            String::from_utf8_lossy(&tree.stderr)
+        );
+        last_tree = String::from_utf8_lossy(&tree.stdout).into_owned();
+        let pids = last_tree
+            .lines()
+            .filter(|line| line.to_ascii_uppercase().contains("PING.EXE"))
+            .filter_map(|line| line.split_whitespace().next()?.parse::<u32>().ok())
+            .collect::<Vec<_>>();
+        if pids.len() >= 2 {
+            process_handles = pids
+                .into_iter()
+                .filter_map(|pid| {
+                    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+                    (!handle.is_null()).then_some(handle)
+                })
+                .collect();
+            if process_handles.len() >= 2 {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        process_handles.len(),
+        2,
+        "the process tree did not contain both ping descendants: {last_tree}"
+    );
+
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    for handle in process_handles {
+        assert_eq!(
+            unsafe { WaitForSingleObject(handle, 5_000) },
+            WAIT_OBJECT_0,
+            "a descendant process remained alive after the service stopped"
+        );
+        unsafe { CloseHandle(handle) };
+    }
 }
 
 #[test]
