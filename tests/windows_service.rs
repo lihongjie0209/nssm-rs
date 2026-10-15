@@ -3,9 +3,12 @@
 use std::{
     os::windows::io::AsRawHandle,
     process::{Command, Output},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+static SERVICE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nssm-r"))
@@ -49,7 +52,8 @@ fn unique_service_name() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("NssmRTest{}_{}", std::process::id(), stamp)
+    let sequence = SERVICE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("NssmRTest{}_{}_{}", std::process::id(), stamp, sequence)
 }
 
 struct Cleanup(String);
@@ -528,8 +532,13 @@ fn runs_configured_start_and_exit_hooks() {
         "install failed: {}",
         String::from_utf8_lossy(&installed.stderr)
     );
+    assert!(
+        cli(&["set", &service, "DisplayName", "Hook ABITest Service"])
+            .status
+            .success()
+    );
     for ((event_action, marker), path) in [
-        ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_COMMAND_LINE%"),
+        ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_SERVICE_DISPLAYNAME% %NSSM_COMMAND_LINE%"),
         ("Start/Post", "start-post"),
         ("Exit/Post", "exit-post"),
     ]
@@ -571,6 +580,9 @@ fn runs_configured_start_and_exit_hooks() {
     assert_eq!(fields.next(), Some("Pre"));
     assert_eq!(fields.next(), Some("START"));
     assert_eq!(fields.next(), Some("20000"));
+    assert_eq!(fields.next(), Some("Hook"));
+    assert_eq!(fields.next(), Some("ABITest"));
+    assert_eq!(fields.next(), Some("Service"));
     let command_line = fields.collect::<Vec<_>>().join(" ");
     assert!(command_line.contains("cmd.exe"));
     assert_eq!(

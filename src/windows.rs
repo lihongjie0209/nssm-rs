@@ -2571,6 +2571,10 @@ fn invoke_hook(
     } else {
         "60000"
     };
+    let service_handle = open_service(service, SERVICE_QUERY_CONFIG)?;
+    let (service_config_storage, service_config) = query_service_config(service_handle.0)?;
+    let _keep_service_config_storage_alive = service_config_storage;
+    let display_name = wide_pointer(service_config.lpDisplayName);
     command
         .env("NSSM_HOOK_VERSION", "1")
         .env("NSSM_EVENT", event)
@@ -2582,7 +2586,7 @@ fn invoke_hook(
             option_env!("NSSM_BUILD_DATE").unwrap_or(""),
         )
         .env("NSSM_SERVICE_NAME", service)
-        .env("NSSM_SERVICE_DISPLAYNAME", "")
+        .env("NSSM_SERVICE_DISPLAYNAME", display_name)
         .env("NSSM_EXE", image)
         .env("NSSM_VERSION", nssm_r::VERSION)
         .env("NSSM_PID", std::process::id().to_string())
