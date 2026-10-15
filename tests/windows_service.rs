@@ -702,9 +702,15 @@ fn continue_interrupts_restart_throttle_and_pause_is_rejected() {
         wait_for_service_state(&service, "SERVICE_PAUSED"),
         "service did not enter the NSSM restart-throttle paused state"
     );
+    let paused_again = cli(&["pause", &service]);
     assert!(
-        !cli(&["pause", &service]).status.success(),
-        "NSSM should reject Pause while paused for restart throttling"
+        paused_again.status.success(),
+        "pause control failed: {}",
+        String::from_utf8_lossy(&paused_again.stderr)
+    );
+    assert!(
+        wait_for_service_state(&service, "SERVICE_PAUSED"),
+        "Pause unexpectedly resumed the throttled service"
     );
     let continued = cli(&["continue", &service]);
     assert!(
