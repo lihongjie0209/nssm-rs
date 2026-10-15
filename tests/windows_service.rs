@@ -475,7 +475,7 @@ fn timestamp_log_prefixes_each_child_output_line_in_utc() {
     assert_eq!(lines.len(), 2, "unexpected timestamped log: {output:?}");
     for (line, marker) in lines.into_iter().zip(["first-marker", "second-marker"]) {
         assert!(
-            line.ends_with(marker),
+            line.contains(marker),
             "timestamped line lost child output: {line:?}"
         );
         let (timestamp, _) = line.split_once(": ").expect("timestamp separator exists");

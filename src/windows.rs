@@ -2092,13 +2092,15 @@ fn timestamp_stream<R: Read, W: Write>(mut input: R, mut output: W) -> io::Resul
         if count == 0 {
             return output.flush();
         }
+        let mut chunk = Vec::with_capacity(count + count / 40 * 25);
         for byte in &buffer[..count] {
             if line_start {
-                output.write_all(utc_timestamp_prefix().as_bytes())?;
+                chunk.extend_from_slice(utc_timestamp_prefix().as_bytes());
             }
-            output.write_all(std::slice::from_ref(byte))?;
+            chunk.push(*byte);
             line_start = *byte == b'\n';
         }
+        output.write_all(&chunk)?;
     }
 }
 
