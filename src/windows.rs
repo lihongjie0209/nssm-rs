@@ -5285,12 +5285,11 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                     Err(_) => {}
                 }
             }
-            if !child_still_active {
-                if let Ok(status) = proc.child.wait()
-                    && STOP_REQUESTED.load(Ordering::SeqCst)
-                {
-                    child_exit_code = status.code().unwrap_or(1) as u32;
-                }
+            if !child_still_active
+                && let Ok(status) = proc.child.wait()
+                && STOP_REQUESTED.load(Ordering::SeqCst)
+            {
+                child_exit_code = status.code().unwrap_or(1) as u32;
             }
             if proc.job != 0 && !tree_events_logged {
                 report_process_tree_events(&service_name, proc.child.id(), child_exit_code, false);
