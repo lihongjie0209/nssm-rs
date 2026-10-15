@@ -157,7 +157,8 @@ NSSM launches these hook processes asynchronously, and nssm-rs now does the
 same. Windows unit tests cover event mapping, SCM control code, hook names and
 async dispatch policy, plus the Power hook trigger, last-control name and
 deadline values. A deterministic test checks the complete `NSSM_*` environment
-mapping used by Power hooks. Windows `ControlService` does not expose
+mapping used by Power hooks, including the last application exit code when a
+Power event arrives between child processes. Windows `ControlService` does not expose
 `SERVICE_CONTROL_POWEREVENT` as a caller-sendable control, so injecting a real
 power broadcast into a service still requires an OS power event; actual system
 delivery and end-to-end propagation of the Power ABI into a launched hook remain

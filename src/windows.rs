@@ -198,6 +198,7 @@ static HOOK_LAST_CONTROL: AtomicU32 = AtomicU32::new(0);
 static HOOK_SERVICE_START_MS: AtomicU64 = AtomicU64::new(0);
 static HOOK_APPLICATION_START_MS: AtomicU64 = AtomicU64::new(0);
 static HOOK_APPLICATION_RUNTIME_MS: AtomicU64 = AtomicU64::new(0);
+static HOOK_LAST_APPLICATION_EXIT_CODE: AtomicU32 = AtomicU32::new(0);
 static CHILD_PROCESS: Mutex<Option<ManagedChild>> = Mutex::new(None);
 static SERVICE_CHILD_ENVIRONMENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static ASYNC_HOOKS: Mutex<Vec<Child>> = Mutex::new(Vec::new());
@@ -3169,6 +3170,10 @@ fn hook_trigger(event: &str, control: u32) -> &'static str {
     }
 }
 
+fn hook_exit_code(application_pid: Option<u32>, last_exit_code: u32) -> Option<u32> {
+    application_pid.is_none().then_some(last_exit_code)
+}
+
 struct HookAbiContext<'a> {
     event: &'a str,
     action: &'a str,
@@ -3501,13 +3506,17 @@ unsafe extern "system" fn service_handler(
                 .lock()
                 .ok()
                 .and_then(|child| child.as_ref().map(|child| child.child.id()));
+            let exit_code = hook_exit_code(
+                app_pid,
+                HOOK_LAST_APPLICATION_EXIT_CODE.load(Ordering::SeqCst),
+            );
             let _ = invoke_hook(
                 &service_name,
                 "Power",
                 invocation.action.hook_action(),
                 &child_environment,
                 app_pid,
-                None,
+                exit_code,
                 invocation.synchronous,
                 invocation.cancel_on_stop,
             );
@@ -3562,6 +3571,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     HOOK_SERVICE_START_MS.store(unix_time_millis(), Ordering::SeqCst);
     HOOK_APPLICATION_START_MS.store(0, Ordering::SeqCst);
     HOOK_APPLICATION_RUNTIME_MS.store(0, Ordering::SeqCst);
+    HOOK_LAST_APPLICATION_EXIT_CODE.store(0, Ordering::SeqCst);
     let name_wide = wide(OsStr::new(&service_name));
     let handle = unsafe {
         RegisterServiceCtrlHandlerExW(
@@ -4090,6 +4100,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         {
             child_exit_code = 2;
         }
+        HOOK_LAST_APPLICATION_EXIT_CODE.store(child_exit_code, Ordering::SeqCst);
         if !STOP_REQUESTED.load(Ordering::SeqCst) {
             report_event(
                 windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
@@ -4536,9 +4547,9 @@ mod tests {
         EVENT_SERVICE_CONTROL_UNKNOWN, HookAbiContext, PBT_APMPOWERSTATUSCHANGE,
         PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CONTROL_PAUSE,
         elevation_arguments, elevation_parameters, hook_abi_environment, hook_deadline_ms,
-        hook_trigger, parse_u32, power_hook_action, power_hook_invocation, priority_name,
-        priority_value, process_belongs_to_service_lifetime, quote_dump_arg, service_control_event,
-        service_type_name, valid_hook,
+        hook_exit_code, hook_trigger, parse_u32, power_hook_action, power_hook_invocation,
+        priority_name, priority_value, process_belongs_to_service_lifetime, quote_dump_arg,
+        service_control_event, service_type_name, valid_hook,
     };
 
     #[test]
@@ -4658,6 +4669,12 @@ mod tests {
                 "Power hooks use the general hook deadline"
             );
         }
+    }
+
+    #[test]
+    fn power_hook_exit_code_is_empty_while_application_runs_and_retained_after_exit() {
+        assert_eq!(hook_exit_code(Some(900), 17), None);
+        assert_eq!(hook_exit_code(None, 17), Some(17));
     }
 
     #[test]
