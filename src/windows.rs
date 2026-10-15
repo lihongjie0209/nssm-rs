@@ -58,6 +58,7 @@ const DELETE_ACCESS: u32 = 0x0001_0000;
 const STOP_SKIP_CONSOLE: u32 = 1;
 const SERVICE_INTERACTIVE_PROCESS_FLAG: u32 = 0x100;
 const EVENT_DISPATCHER_FAILED: u32 = 0xc000_03e9;
+const EVENT_OPENSCMANAGER_FAILED: u32 = 0xc000_03ea;
 const EVENT_START_SERVICE_FAILED: u32 = 0xc000_03ee;
 const EVENT_RESTART_SERVICE_FAILED: u32 = 0x8000_03ef;
 const EVENT_STARTED_SERVICE: u32 = 0x4000_03f0;
@@ -2212,7 +2213,15 @@ impl Drop for ScHandle {
 fn open_manager(access: u32) -> Result<ScHandle, String> {
     let h = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), access) };
     if h.is_null() {
-        Err(io::Error::last_os_error().to_string())
+        let error = io::Error::last_os_error();
+        if is_administrator() {
+            report_event(
+                windows_sys::Win32::System::EventLog::EVENTLOG_ERROR_TYPE,
+                EVENT_OPENSCMANAGER_FAILED,
+                &[],
+            );
+        }
+        Err(error.to_string())
     } else {
         Ok(ScHandle(h))
     }
@@ -5442,19 +5451,20 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
-        EVENT_SERVICE_CONTROL_UNKNOWN, FAIL_NEXT_PROCESS_ENUMERATION, FAIL_NEXT_PROCESS_SNAPSHOT,
-        FAIL_NEXT_PROCESS_TIMES, FAIL_NEXT_STDIO_DUPLICATE, FAIL_OPEN_PROCESS_PID,
-        HOOK_LAST_APPLICATION_EXIT_CODE, HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE,
-        PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT,
-        SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT, StdioFileError, dump_open_service_error,
-        duplicate_stdio_file, elevation_arguments, elevation_parameters, ensure_event_source,
-        finish_async_hooks, hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger,
-        install, parse_u32, power_hook_action, power_hook_invocation, priority_name,
-        priority_value, process_belongs_to_service_lifetime, process_open_error_output,
-        process_tree_from_root, quote_dump_arg, remove, report_stdio_setup_failure,
-        service_control_event, service_handler, service_main, service_type_name, set_setting,
-        valid_hook, wide,
+        Command, EVENT_OPENSCMANAGER_FAILED, EVENT_SERVICE_CONTROL_HANDLED,
+        EVENT_SERVICE_CONTROL_NOT_HANDLED, EVENT_SERVICE_CONTROL_UNKNOWN,
+        FAIL_NEXT_PROCESS_ENUMERATION, FAIL_NEXT_PROCESS_SNAPSHOT, FAIL_NEXT_PROCESS_TIMES,
+        FAIL_NEXT_STDIO_DUPLICATE, FAIL_OPEN_PROCESS_PID, HOOK_LAST_APPLICATION_EXIT_CODE,
+        HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
+        PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTROL_PAUSE,
+        SERVICE_CONTROL_POWEREVENT, StdioFileError, dump_open_service_error, duplicate_stdio_file,
+        elevation_arguments, elevation_parameters, ensure_event_source, finish_async_hooks,
+        hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger, install,
+        is_administrator, open_manager, parse_u32, power_hook_action, power_hook_invocation,
+        priority_name, priority_value, process_belongs_to_service_lifetime,
+        process_open_error_output, process_tree_from_root, quote_dump_arg, remove,
+        report_stdio_setup_failure, service_control_event, service_handler, service_main,
+        service_type_name, set_setting, valid_hook, wide,
     };
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -5477,6 +5487,23 @@ mod tests {
             .trim()
             .parse()
             .expect("PowerShell returns the prior event record number")
+    }
+
+    #[test]
+    fn administrator_scm_open_failure_is_written_to_the_application_log() {
+        let event_id = EVENT_OPENSCMANAGER_FAILED & 0xffff;
+        let event_record = if is_administrator() {
+            ensure_event_source().expect("the test runner can register the NSSM event source");
+            Some(latest_event_record(&powershell_path(), event_id))
+        } else {
+            None
+        };
+
+        assert!(open_manager(u32::MAX).is_err());
+
+        if let Some(before) = event_record {
+            wait_for_event(&powershell_path(), event_id, before, "");
+        }
     }
 
     fn wait_for_event(powershell: &str, event_id: u32, after: u64, text: &str) {
