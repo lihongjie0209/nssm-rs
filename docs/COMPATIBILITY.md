@@ -138,7 +138,7 @@ that configured priority class and CPU affinity are effective at runtime. The
 SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
 acceptance scope includes hook ABI context parity for Power events, event-log compatibility
-beyond events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, and 1020,
+beyond events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, 1020 and 1035,
 broader error-path coverage, and command-by-command parity against the pinned
 reference. Missing-service exit status 3 is now covered for status, start, stop,
 restart, pause, continue, rotate, get, set, reset and confirmed remove.

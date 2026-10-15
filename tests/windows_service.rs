@@ -2119,6 +2119,14 @@ fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
         wait_for_service_state(&service, "SERVICE_RUNNING"),
         "service did not return to running after Continue"
     );
+    let escaped_service = service.replace('\'', "''");
+    let event_script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1035}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 1 -and $event.Properties[0].Value -eq '{escaped_service}') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event_script),
+        "Application log contains event 1035 for resetting the restart throttle on Continue"
+    );
 }
 
 #[test]

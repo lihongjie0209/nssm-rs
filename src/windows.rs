@@ -55,6 +55,7 @@ const EVENT_EXIT_RESTART: u32 = 0x4000_03f6;
 const EVENT_EXIT_IGNORE: u32 = 0x4000_03f7;
 const EVENT_EXIT: u32 = 0x4000_03f8;
 const EVENT_EXIT_UNCLEAN: u32 = 0x4000_03fc;
+const EVENT_RESET_THROTTLE: u32 = 0x4000_040b;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
@@ -3026,7 +3027,7 @@ unsafe extern "system" fn service_handler(
     control: u32,
     event_type: u32,
     _: *mut std::ffi::c_void,
-    _: *mut std::ffi::c_void,
+    context: *mut std::ffi::c_void,
 ) -> u32 {
     match control {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
@@ -3052,6 +3053,12 @@ unsafe extern "system" fn service_handler(
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
             HOOK_THROTTLE_COUNT.store(0, Ordering::SeqCst);
             CONTINUE_REQUESTED.store(true, Ordering::SeqCst);
+            let service = wide_pointer(context.cast());
+            report_event(
+                windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                EVENT_RESET_THROTTLE,
+                &[&service],
+            );
             set_status(SERVICE_CONTINUE_PENDING, 0, 10_000);
         }
         SERVICE_CONTROL_PAUSE => return 120,
@@ -3088,7 +3095,11 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     HOOK_APPLICATION_RUNTIME_MS.store(0, Ordering::SeqCst);
     let name_wide = wide(OsStr::new(&service_name));
     let handle = unsafe {
-        RegisterServiceCtrlHandlerExW(name_wide.as_ptr(), Some(service_handler), ptr::null())
+        RegisterServiceCtrlHandlerExW(
+            name_wide.as_ptr(),
+            Some(service_handler),
+            name_wide.as_ptr().cast_mut().cast(),
+        )
     };
     if handle.is_null() {
         return;

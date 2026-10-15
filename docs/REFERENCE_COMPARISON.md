@@ -32,6 +32,7 @@ It is a partial report, not the command-by-command release acceptance report.
 | `statuscode` for a missing service | Both exited 0, matching NSSM's documented failure sentinel. Diagnostic wording differs. |
 | Missing-service lookup for `status`, `start`, `stop`, `restart`, `pause`, `continue`, `rotate`, `get`, `set`, `reset`, and confirmed `remove` | Directly compared on the local Windows host: NSSM returns exit code 3 for each. nssm-rs now returns 3 and emits no stdout; a Windows integration test exercises the same command set. |
 | Setting operation failures | The pinned source returns 5 when a known setting cannot be read and 6 when a known setting cannot be changed; unknown parameters return 1. nssm-rs maps these paths accordingly. The SCM lifecycle integration test checks the missing `AppExit` read (5), invalid `Start` value (6), and unknown setting (1). |
+| `continue` during restart throttling | The reference writes Application event 1035 (`RESET_THROTTLE`) with the service name when Continue resets the throttle. nssm-rs now reports the same event from its SCM control handler; the real service integration test checks the event record. |
 | `version` | Both commands succeed, but each reports its own binary identity and build metadata. |
 
 ## Remaining comparison work
