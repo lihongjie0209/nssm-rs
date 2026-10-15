@@ -2301,7 +2301,7 @@ fn applies_configured_priority_and_cpu_affinity_to_child_process() {
 }
 
 #[test]
-fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
+fn invalid_runtime_registry_values_log_events_and_fall_back_to_defaults() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
     let capture_path = std::env::temp_dir().join(format!("{service}_priority.txt"));
@@ -2334,7 +2334,7 @@ fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
 
     let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
     let write_invalid_priority = format!(
-        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppPriority -PropertyType DWord -Value 65536 -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppAffinity -PropertyType String -Value 'not-a-cpu-range' -Force"
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppPriority -PropertyType DWord -Value 65536 -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppAffinity -PropertyType String -Value 'not-a-cpu-range' -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppThrottle -PropertyType String -Value 'invalid-throttle' -Force; New-ItemProperty -LiteralPath '{registry_key}' -Name AppRestartDelay -PropertyType String -Value 'invalid-delay' -Force"
     );
     let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
@@ -2378,6 +2378,20 @@ fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
     assert!(
         wait_for_windows_powershell_condition(&event),
         "invalid AppAffinity logs event 1067 with service name and requested mask"
+    );
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1036}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 'AppThrottle' -and $event.Properties[2].Value -eq '1500') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "invalid AppThrottle falls back to 1500 ms and logs event 1036"
+    );
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1071}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 'AppRestartDelay' -and $event.Properties[2].Value -eq '0') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "invalid AppRestartDelay falls back to 0 ms and logs event 1071"
     );
 }
 

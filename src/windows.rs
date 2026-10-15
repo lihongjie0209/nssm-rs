@@ -106,6 +106,11 @@ const EVENT_EFFECTIVE_AFFINITY_MASK: u32 = 0x8000_042c;
 const EVENT_GET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0x8000_042d;
 const EVENT_SET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0xc000_042e;
 const EVENT_BOGUS_STOP_METHOD_SKIP: u32 = 0x8000_041c;
+const EVENT_BOGUS_KILL_CONSOLE_GRACE_PERIOD: u32 = 0x8000_0420;
+const EVENT_BOGUS_KILL_WINDOW_GRACE_PERIOD: u32 = 0x8000_0421;
+const EVENT_BOGUS_KILL_THREADS_GRACE_PERIOD: u32 = 0x8000_0422;
+const EVENT_BOGUS_THROTTLE: u32 = 0x8000_040c;
+const EVENT_BOGUS_RESTART_DELAY: u32 = 0x8000_042f;
 const EVENT_PRESTART_HOOK_ABORT: u32 = 0xc000_0437;
 const EVENT_PROCESS_STILL_ACTIVE: u32 = 0x8000_041d;
 const EVENT_SERVICE_CONFIG_FAILURE_ACTIONS_FAILED: u32 = 0xc000_0413;
@@ -3273,6 +3278,61 @@ fn read_reg_dword(service: &str, value: &str, default: u32) -> Result<u32, Strin
     Ok(data)
 }
 
+fn read_milliseconds_override(
+    service: &str,
+    value: &str,
+    default: u32,
+    invalid_value_event: u32,
+) -> u32 {
+    let key = match open_registry_key(service, "", false, KEY_QUERY_VALUE) {
+        Ok(key) => key,
+        Err(error) => {
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_QUERYVALUE_FAILED,
+                &[value, &error],
+            );
+            return default;
+        }
+    };
+    let value_name = wide(OsStr::new(value));
+    let mut kind = REG_DWORD;
+    let mut data = 0u32;
+    let mut bytes = std::mem::size_of::<u32>() as u32;
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            value_name.as_ptr(),
+            ptr::null(),
+            &mut kind,
+            (&mut data as *mut u32).cast(),
+            &mut bytes,
+        )
+    };
+    if code == 2 {
+        return default;
+    }
+    if code != 0 {
+        if kind != REG_DWORD {
+            let default_value = default.to_string();
+            report_event(
+                windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                invalid_value_event,
+                &[service, value, &default_value],
+            );
+        } else {
+            let error = registry_error(code);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_QUERYVALUE_FAILED,
+                &[value, &error],
+            );
+        }
+        return default;
+    }
+    data
+}
+
 fn read_stop_method_skip(service: &str) -> u32 {
     let key = match open_registry_key(service, "", false, KEY_QUERY_VALUE) {
         Ok(key) => key,
@@ -3953,7 +4013,13 @@ fn stop_child(
                     StopMethod::Terminate => unreachable!(),
                 };
                 signal(pid);
-                let delay = read_reg_dword(service, setting, 1500)?;
+                let invalid_value_event = match method {
+                    StopMethod::Console => EVENT_BOGUS_KILL_CONSOLE_GRACE_PERIOD,
+                    StopMethod::Window => EVENT_BOGUS_KILL_WINDOW_GRACE_PERIOD,
+                    StopMethod::Threads => EVENT_BOGUS_KILL_THREADS_GRACE_PERIOD,
+                    StopMethod::Terminate => unreachable!(),
+                };
+                let delay = read_milliseconds_override(service, setting, 1500, invalid_value_event);
                 if wait_process_for(
                     &mut child.child,
                     Duration::from_millis(delay as u64),
@@ -4817,20 +4883,14 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     if let Ok(mut environment) = SERVICE_CHILD_ENVIRONMENT.lock() {
         *environment = child_environment.clone();
     }
-    let throttle_ms = match read_reg_dword(&service_name, "AppThrottle", 1500) {
-        Ok(value) => value,
-        Err(_) => {
-            set_status(SERVICE_STOPPED, 2, 0);
-            return;
-        }
-    };
-    let restart_delay_ms = match read_reg_dword(&service_name, "AppRestartDelay", 0) {
-        Ok(value) => value,
-        Err(_) => {
-            set_status(SERVICE_STOPPED, 2, 0);
-            return;
-        }
-    };
+    let throttle_ms =
+        read_milliseconds_override(&service_name, "AppThrottle", 1500, EVENT_BOGUS_THROTTLE);
+    let restart_delay_ms = read_milliseconds_override(
+        &service_name,
+        "AppRestartDelay",
+        0,
+        EVENT_BOGUS_RESTART_DELAY,
+    );
     let rotate_files = read_reg_dword(&service_name, "AppRotateFiles", 0).unwrap_or(0) != 0;
     let rotate_online = read_reg_dword(&service_name, "AppRotateOnline", 0).unwrap_or(0) != 0;
     ROTATE_ENABLED.store(rotate_online, Ordering::SeqCst);
@@ -4839,9 +4899,12 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     let rotate_low = read_reg_dword(&service_name, "AppRotateBytes", 0).unwrap_or(0) as u64;
     let rotate_high = read_reg_dword(&service_name, "AppRotateBytesHigh", 0).unwrap_or(0) as u64;
     let rotate_size = (rotate_high << 32) | rotate_low;
-    let rotate_delay = Duration::from_millis(
-        read_reg_dword(&service_name, "AppRotateDelay", 0).unwrap_or(0) as u64,
-    );
+    let rotate_delay = Duration::from_millis(read_milliseconds_override(
+        &service_name,
+        "AppRotateDelay",
+        0,
+        EVENT_BOGUS_THROTTLE,
+    ) as u64);
     let (stdout_path, stderr_path) = match (
         read_optional_reg_string(&service_name, "AppStdout"),
         read_optional_reg_string(&service_name, "AppStderr"),
