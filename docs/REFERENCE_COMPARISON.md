@@ -20,6 +20,8 @@ It is a partial report, not the command-by-command release acceptance report.
 |---|---|
 | `list all ignored` | Both exited 0 and returned the same 331 service names. This confirms the reference behavior of considering only the first optional argument. |
 | `list definitely-not-all` | Both exited 0. The host had no NSSM-managed services, so both returned no names. |
+| `list` and `list all` | Rechecked both commands against the pinned executable on 2026-10-15; output and exit status matched on this host. |
+| `status Spooler` and `statuscode Spooler` | Output and status matched exactly. Both statuscode invocations returned the host's `SERVICE_RUNNING` numeric code (4). |
 | `get Spooler Start` | Both exited 0 and returned the same startup type. |
 | `get Spooler Type` | Both exited 0 and returned the same service type. |
 | `get Spooler DisplayName` | Both exited 0 and returned the same display name. |
