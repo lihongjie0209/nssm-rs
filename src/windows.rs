@@ -571,6 +571,8 @@ fn get_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), S
     if spec.kind == SettingKind::ExitAction {
         let code =
             additional.ok_or_else(|| "AppExit requires an exit code or Default".to_owned())?;
+        // NSSM fails this query when the AppExit key has not been initialized.
+        let _key = open_registry_key(service, "AppExit", false, KEY_QUERY_VALUE)?;
         let action = if code.eq_ignore_ascii_case("default") || code == "*" || code.is_empty() {
             read_exit_rule(service, None)?.unwrap_or(ExitAction::Restart)
         } else {
@@ -2605,6 +2607,14 @@ fn read_exit_rule(service: &str, exit_code: Option<u32>) -> Result<Option<ExitAc
         .map_err(|error| error.to_string())
 }
 
+fn ensure_default_exit_action(service: &str) -> Result<(), String> {
+    let key = open_registry_key(service, "AppExit", true, KEY_QUERY_VALUE | KEY_SET_VALUE)?;
+    if read_raw_value(key.0, None)?.is_none() {
+        write_raw_value(key.0, None, REG_SZ, &encode_wide("Restart", 1))?;
+    }
+    Ok(())
+}
+
 fn read_hook(service: &str, hook: &str) -> Result<Option<String>, String> {
     let (event, action) = hook
         .split_once('/')
@@ -2995,6 +3005,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     }
     SERVICE_STATUS_HANDLE_VALUE.store(handle as isize, Ordering::SeqCst);
     set_status(SERVICE_START_PENDING, 0, 10_000);
+    let _ = ensure_default_exit_action(&service_name);
     let config = (|| -> Result<(String, Vec<String>, Option<String>, Option<Vec<String>>, Vec<String>, Vec<String>, Option<String>, u32, bool, bool), String> {
         let inherited: Vec<String> = std::env::vars_os().map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy())).collect();
         let app_environment = read_multi_parameter(&service_name, "AppEnvironment")?;

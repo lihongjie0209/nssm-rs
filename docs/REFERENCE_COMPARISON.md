@@ -25,6 +25,7 @@ It is a partial report, not the command-by-command release acceptance report.
 | `get Spooler DisplayName` | Both exited 0 and returned the same display name. |
 | `get Spooler ObjectName` | Both exited 0 and returned the same account name. |
 | `get Spooler DependOnService` | Both returned `RPCSS` and `http` in the same order. The reference emits `CR CR LF` between items and CRLF at the end; nssm-r emits standard CRLF between items and LF at the end. |
+| `get <new-service> AppExit Default` before first start / after first start | Both fail before the first start because the `AppExit` key does not yet exist, then return `Restart` after startup initializes the default rule. NSSM emits an uninitialized control character when the key exists but has no default value; nssm-r keeps a deterministic `Restart` fallback for this malformed state. |
 | `get Spooler Description` | The reference emitted question marks for the host's Chinese description under its active output code page. nssm-r emitted the UTF-8 Chinese text. Raw bytes differ; output encoding compatibility remains open. |
 | `statuscode` for a missing service | Both exited 0, matching NSSM's documented failure sentinel. Diagnostic wording differs. |
 | `version` | Both commands succeed, but each reports its own binary identity and build metadata. |

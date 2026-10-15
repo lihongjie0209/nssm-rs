@@ -164,6 +164,10 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         String::from_utf8_lossy(&installed.stderr)
     );
 
+    let exit_policy_before_start = cli(&["get", &service, "AppExit", "Default"]);
+    assert!(!exit_policy_before_start.status.success());
+    assert!(exit_policy_before_start.stdout.is_empty());
+
     assert!(
         cli(&["set", &service, "Description", "nssm-r test service"])
             .status
@@ -387,6 +391,13 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         thread::sleep(Duration::from_millis(100));
     }
     assert!(running, "SCM never reported the wrapper as running");
+
+    let default_exit_policy = cli(&["get", &service, "AppExit", "Default"]);
+    assert!(default_exit_policy.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&default_exit_policy.stdout).trim(),
+        "Restart"
+    );
 
     let status_code = cli(&["statuscode", &service]);
     assert_eq!(status_code.status.code(), Some(4));
