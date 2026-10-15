@@ -204,6 +204,23 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
         Add-Result $results $Binary "get reset $setting key" `
             @('get', $Service, $setting, 'NSSMR_PARITY') | Out-Null
     }
+    foreach ($setting in @(
+        @{ Name = 'DisplayName'; Value = "$Service reference display name" },
+        @{ Name = 'Start'; Value = 'SERVICE_AUTO_START' },
+        @{ Name = 'Type'; Value = 'SERVICE_WIN32_OWN_PROCESS' },
+        @{ Name = 'DependOnService'; Value = 'RpcSs' }
+    )) {
+        Compare-StringSetting $results $Binary $Service $setting.Name $setting.Value $null
+    }
+    Add-Result $results $Binary 'set Environment' `
+        @('set', $Service, 'Environment', '+NSSMR_NATIVE=value') | Out-Null
+    $nativeEnvironmentValue = Add-Result $results $Binary 'get Environment key' `
+        @('get', $Service, 'Environment', 'NSSMR_NATIVE')
+    Assert-SettingValue $nativeEnvironmentValue 'value' 'get Environment key'
+    Add-Result $results $Binary 'reset Environment' `
+        @('reset', $Service, 'Environment') | Out-Null
+    Add-Result $results $Binary 'get reset Environment key' `
+        @('get', $Service, 'Environment', 'NSSMR_NATIVE') | Out-Null
     Add-Result $results $Binary 'restore AppParameters' `
         @('set', $Service, 'AppParameters', '-t 127.0.0.1') | Out-Null
     Add-Result $results $Binary 'restore AppDirectory' `
