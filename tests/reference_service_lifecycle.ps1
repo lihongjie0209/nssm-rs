@@ -193,6 +193,17 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     }
     Compare-StringSetting $results $Binary $Service 'AppExit' 'Ignore' 'Restart' '23'
     Compare-StringSetting $results $Binary $Service 'AppEvents' 'cmd.exe /c exit 0' $null 'Start/Pre'
+    foreach ($setting in @('AppEnvironment', 'AppEnvironmentExtra')) {
+        Add-Result $results $Binary "set $setting" `
+            @('set', $Service, $setting, '+NSSMR_PARITY=value') | Out-Null
+        $environmentValue = Add-Result $results $Binary "get $setting key" `
+            @('get', $Service, $setting, 'NSSMR_PARITY')
+        Assert-SettingValue $environmentValue 'value' "get $setting key"
+        Add-Result $results $Binary "reset $setting" `
+            @('reset', $Service, $setting) | Out-Null
+        Add-Result $results $Binary "get reset $setting key" `
+            @('get', $Service, $setting, 'NSSMR_PARITY') | Out-Null
+    }
     Add-Result $results $Binary 'restore AppParameters' `
         @('set', $Service, 'AppParameters', '-t 127.0.0.1') | Out-Null
     Add-Result $results $Binary 'restore AppDirectory' `
