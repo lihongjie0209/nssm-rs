@@ -1231,7 +1231,7 @@ fn long_stop_wait_updates_status_and_logs_event_1078() {
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "window-close");
 
     let event = format!(
-        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1078}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ $p = $event.Properties; if ($p.Count -eq 5 -and $p[0].Value -eq 'kill_process()' -and $p[1].Value -eq '{service}' -and $p[2].Value -eq 20000 -and $p[3].Value -eq 4000 -and $p[4].Value -eq 24000) {{ exit 0 }} }}; exit 1"
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1078}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ $p = $event.Properties; if ($p.Count -eq 5 -and $p[0].Value -eq 'kill_process' -and $p[1].Value -eq '{service}' -and $p[2].Value -eq 20000 -and $p[3].Value -eq 4000 -and $p[4].Value -eq 24000) {{ exit 0 }} }}; exit 1"
     );
     assert!(
         wait_for_windows_powershell_condition(&event),

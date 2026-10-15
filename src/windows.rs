@@ -3913,17 +3913,17 @@ fn stop_child(
                     StopMethod::Console => (
                         "AppStopMethodConsole",
                         send_console_ctrl_c as fn(u32),
-                        "kill_console()",
+                        "kill_console",
                     ),
                     StopMethod::Window => (
                         "AppStopMethodWindow",
                         send_window_close as fn(u32),
-                        "kill_process()",
+                        "kill_process",
                     ),
                     StopMethod::Threads => (
                         "AppStopMethodThreads",
                         send_thread_quit as fn(u32),
-                        "kill_process()",
+                        "kill_process",
                     ),
                     StopMethod::Terminate => unreachable!(),
                 };
