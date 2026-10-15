@@ -959,10 +959,12 @@ fn processes_on_missing_service_returns_reference_command_status() {
         "processes should return NSSM's command failure status"
     );
     assert!(result.stdout.is_empty(), "missing service produced stdout");
-    assert_eq!(
-        String::from_utf8_lossy(&result.stderr).trim(),
-        "Can't open service!"
+    assert!(
+        result
+            .stderr
+            .starts_with(b"Can't open service!\r\r\nEnumServicesStatus(): ")
     );
+    assert!(result.stderr.ends_with(b"\r\r\n\r\r\n"));
 }
 
 #[test]

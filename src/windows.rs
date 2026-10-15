@@ -2219,6 +2219,40 @@ fn missing_service_error(name: &str) -> Option<io::Error> {
     (error.raw_os_error() == Some(1060)).then_some(error)
 }
 
+fn missing_process_service_diagnostic() -> String {
+    let manager = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        let error = io::Error::last_os_error();
+        return format!(
+            "Can't open service!\r\r\nEnumServicesStatus(): {}\r\r\n\r",
+            windows_error_message(&error)
+        );
+    }
+    let mut required = 0;
+    let mut returned = 0;
+    let mut resume = 0;
+    unsafe {
+        EnumServicesStatusExW(
+            manager,
+            SC_ENUM_PROCESS_INFO,
+            SERVICE_DRIVER | SERVICE_FILE_SYSTEM_DRIVER | SERVICE_KERNEL_DRIVER | SERVICE_WIN32,
+            SERVICE_STATE_ALL,
+            ptr::null_mut(),
+            0,
+            &mut required,
+            &mut returned,
+            &mut resume,
+            ptr::null(),
+        );
+    }
+    let error = io::Error::last_os_error();
+    unsafe { CloseServiceHandle(manager) };
+    format!(
+        "Can't open service!\r\r\nEnumServicesStatus(): {}\r\r\n\r",
+        windows_error_message(&error)
+    )
+}
+
 fn print_open_service_error(error: &io::Error) {
     let error_message = windows_error_message(error);
     cli_eprintln!("Can't open service!\r\r\nOpenService(): {error_message}\r\r\n\r\r");
@@ -2682,7 +2716,7 @@ fn processes(services: &[String]) -> Result<(), String> {
     let mut errors = Vec::new();
     for service in services {
         if missing_service_error(service).is_some() {
-            errors.push("Can't open service!".to_owned());
+            errors.push(missing_process_service_diagnostic());
             continue;
         }
         if let Err(error) = process_tree(service) {
@@ -4912,7 +4946,16 @@ fn elevation_parameters(arguments: &[String]) -> String {
         .join(" ")
 }
 
-fn elevate(arguments: &[String]) -> u8 {
+fn elevate(arguments: &[String], command: &Command) -> u8 {
+    match command {
+        Command::Install { .. } => {
+            cli_eprintln!("Administrator access is needed to install a service.\r\r");
+        }
+        Command::Remove { .. } => {
+            cli_eprintln!("Administrator access is needed to remove a service.\r\r");
+        }
+        _ => {}
+    }
     let executable = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
@@ -4958,6 +5001,11 @@ fn elevate(arguments: &[String]) -> u8 {
 }
 
 pub fn execute(command: Command) -> Result<u8, String> {
+    if !is_administrator()
+        && let Some(arguments) = elevation_arguments(&command)
+    {
+        return Ok(elevate(&arguments, &command));
+    }
     let service = match &command {
         Command::Start(service)
         | Command::Stop(service)
@@ -4984,11 +5032,6 @@ pub fn execute(command: Command) -> Result<u8, String> {
     {
         print_open_service_error(&error);
         return Ok(3);
-    }
-    if !is_administrator()
-        && let Some(arguments) = elevation_arguments(&command)
-    {
-        return Ok(elevate(&arguments));
     }
     let managed_parameter = match &command {
         Command::Get {
