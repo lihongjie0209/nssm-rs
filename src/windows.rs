@@ -2200,10 +2200,10 @@ fn open_service(name: &str, access: u32) -> Result<ScHandle, String> {
     }
 }
 
-fn service_is_missing(name: &str) -> bool {
+fn missing_service_error(name: &str) -> Option<io::Error> {
     let manager = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
     if manager.is_null() {
-        return false;
+        return None;
     }
     let name = wide(OsStr::new(name));
     let service = unsafe { OpenServiceW(manager, name.as_ptr(), SERVICE_QUERY_STATUS) };
@@ -2212,11 +2212,16 @@ fn service_is_missing(name: &str) -> bool {
             CloseServiceHandle(service);
             CloseServiceHandle(manager);
         }
-        return false;
+        return None;
     }
-    let missing = io::Error::last_os_error().raw_os_error() == Some(1060);
+    let error = io::Error::last_os_error();
     unsafe { CloseServiceHandle(manager) };
-    missing
+    (error.raw_os_error() == Some(1060)).then_some(error)
+}
+
+fn print_open_service_error(error: &io::Error) {
+    let error_message = windows_error_message(error);
+    cli_eprintln!("Can't open service!\r\r\nOpenService(): {error_message}\r\r\n\r\r");
 }
 
 fn is_nssm_service(name: &str) -> bool {
@@ -2676,7 +2681,7 @@ fn process_tree(service: &str) -> Result<(), String> {
 fn processes(services: &[String]) -> Result<(), String> {
     let mut errors = Vec::new();
     for service in services {
-        if service_is_missing(service) {
+        if missing_service_error(service).is_some() {
             errors.push("Can't open service!".to_owned());
             continue;
         }
@@ -4848,6 +4853,10 @@ pub fn run_service(name: &str) -> Result<(), String> {
 }
 
 fn status_code(name: &str) -> Result<u8, String> {
+    if let Some(error) = missing_service_error(name) {
+        print_open_service_error(&error);
+        return Ok(0);
+    }
     let handle = match open_service(name, SERVICE_QUERY_STATUS) {
         Ok(handle) => handle,
         Err(error) => {
@@ -4970,8 +4979,10 @@ pub fn execute(command: Command) -> Result<u8, String> {
         | Command::Help
         | Command::Version => None,
     };
-    if let Some(service) = service.filter(|service| service_is_missing(service)) {
-        cli_eprintln!("nssm-rs: service '{service}' does not exist\r");
+    if let Some(service) = service
+        && let Some(error) = missing_service_error(service)
+    {
+        print_open_service_error(&error);
         return Ok(3);
     }
     if !is_administrator()

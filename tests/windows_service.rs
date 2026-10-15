@@ -923,7 +923,30 @@ fn missing_service_commands_return_nssm_service_lookup_status() {
             "{} unexpectedly wrote stdout",
             arguments[0]
         );
+        if arguments[0] == "status" {
+            assert!(
+                result
+                    .stderr
+                    .starts_with(b"Can't open service!\r\r\nOpenService(): "),
+                "missing-service diagnostic differs from NSSM's open-service message: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                result.stderr.ends_with(b"\r\r\n\r\r\n"),
+                "missing-service diagnostic line endings differ from NSSM: {:?}",
+                result.stderr
+            );
+        }
     }
+    let status_code = cli(&["statuscode", &service]);
+    assert_eq!(status_code.status.code(), Some(0));
+    assert!(status_code.stdout.is_empty());
+    assert!(
+        status_code
+            .stderr
+            .starts_with(b"Can't open service!\r\r\nOpenService(): ")
+    );
+    assert!(status_code.stderr.ends_with(b"\r\r\n\r\r\n"));
 }
 
 #[test]

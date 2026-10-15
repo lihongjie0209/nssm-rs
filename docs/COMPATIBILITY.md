@@ -151,8 +151,8 @@ both the default append behavior and explicit `CREATE_ALWAYS` truncation while
 checking stdin, stdout and stderr contents. When stdout and stderr resolve to
 the same Windows path, nssm-rs now duplicates the stdout handle, uses stdout's
 open settings for both streams, and preserves NSSM's stdout logger / direct
-stderr handle behavior for timestamping and online rotation; an integration scenario checking the
-reference's stdout-wins behavior is pending Windows execution. The Windows suite also verifies that SCM stop reaches responding children through
+stderr handle behavior for timestamping and online rotation; the local elevated
+Windows SCM suite verified the stdout-wins behavior. The Windows suite also verifies that SCM stop reaches responding children through
 CTRL+C, WM_CLOSE and WM_QUIT before termination fallback; hook tests capture all
 documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
 Rotate/Pre/Post and verify the configured working directory. Supported Power
@@ -175,8 +175,8 @@ that configured priority class and CPU affinity are effective at runtime. The
 SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
 acceptance scope includes system-level Power event delivery and end-to-end hook
-ABI propagation; Windows verification of events 1005, 1007, 1024, 1025,
-1026, 1029, 1030, 1044, 1049, 1050, 1051, 1063, 1080 and 1081; and event-log compatibility
+ABI propagation; Windows verification of events 1005, 1024, 1025, 1026, 1044,
+1050 and 1081; and event-log compatibility
 beyond events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1020, 1021, 1034,
 1035, 1040, 1041, 1072 and 1077,
 broader error-path coverage, and command-by-command parity against the pinned
@@ -200,12 +200,13 @@ then events 1051 and 1006 with the output setup failure and service-specific
 exit code. A Windows SCM test configures output under a missing directory and
 checks all three event records. Hook lookup and process creation failures now
 report events 1081 and 1080 respectively; a Windows SCM scenario verifies a
-missing Start/Pre executable does not abort service startup. These new
-scenarios still require local Windows execution before their coverage can be
-counted as verified.
+missing Start/Pre executable does not abort service startup. The elevated local
+Windows run on 2026-10-15 passed the 1007, 1049/1051/1006, 1080, 1029/1030,
+1063, and identical stdout/stderr scenarios. Event 1081 and OS-level failure
+injection for events 1005, 1024/1025/1026/1044, and 1050 remain unverified.
 
 Missing `AppParameters` now logs warning 1029 and uses an empty argument list.
 Missing or empty `AppDirectory` logs warning 1030 and falls back to the
-application's parent directory, then the Windows directory. A Windows SCM test
-checks the event insertion values and the child lifecycle; this scenario still
-requires local Windows execution.
+application's parent directory, then the Windows directory. The local elevated
+Windows SCM run passed the test for event insertion values, fallback directory,
+and the child lifecycle.
