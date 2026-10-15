@@ -1,8 +1,9 @@
 use nssm_rs::{
     Command, ExitAction, LaunchFailureDisposition, MANAGED_SETTINGS, SettingKind, StopMethod,
     compose_child_environment, edit_dependencies, edit_environment, expand_environment_value,
-    log_rotation_due, managed_setting, normalize_cpu_affinity, normalize_exit_action,
-    parse_cpu_affinity, quote_windows_arg, rotated_log_path, split_windows_args,
+    format_cpu_affinity_mask, log_rotation_due, managed_setting, normalize_cpu_affinity,
+    normalize_exit_action, parse_cpu_affinity, quote_windows_arg, rotated_log_path,
+    split_windows_args,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -98,6 +99,7 @@ const EVENT_SERVICE_CONTROL_UNKNOWN: u32 = 0x4000_0412;
 const EVENT_KILL_PROCESS_TREE: u32 = 0x4000_0403;
 const EVENT_BOGUS_PRIORITY: u32 = 0x4000_042a;
 const EVENT_BOGUS_AFFINITY_MASK: u32 = 0x8000_042b;
+const EVENT_EFFECTIVE_AFFINITY_MASK: u32 = 0x8000_042c;
 const PRIORITY_CLASS_MASK: u32 = 0x0000_c1e0;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
@@ -4423,7 +4425,33 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         let configured_affinity = read_optional_reg_string(&service_name, "AppAffinity")?;
         let affinity = match configured_affinity {
             Some(value) if !value.is_empty() => match parse_cpu_affinity(&value) {
-                Ok(_) => Some(value),
+                Ok(mask) => {
+                    if mask != 0 {
+                        let (mut process_mask, mut system_mask) = (0usize, 0usize);
+                        if unsafe {
+                            GetProcessAffinityMask(
+                                GetCurrentProcess(),
+                                &mut process_mask,
+                                &mut system_mask,
+                            )
+                        } != 0
+                        {
+                            let effective_mask = mask as usize & system_mask;
+                            if effective_mask != mask as usize {
+                                let system = format_cpu_affinity_mask(system_mask as u64)
+                                    .unwrap_or_default();
+                                let effective = format_cpu_affinity_mask(effective_mask as u64)
+                                    .unwrap_or_default();
+                                report_event(
+                                    windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                                    EVENT_EFFECTIVE_AFFINITY_MASK,
+                                    &[&service_name, &value, &system, &effective],
+                                );
+                            }
+                        }
+                    }
+                    Some(value)
+                }
                 Err(_) => {
                     report_event(
                         windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,

@@ -911,6 +911,33 @@ pub fn parse_cpu_affinity(value: &str) -> Result<u64, ParseError> {
     Ok(mask)
 }
 
+/// Converts a CPU bitmask to NSSM's canonical processor-list representation.
+/// A zero mask has no explicit affinity and therefore returns `None`.
+pub fn format_cpu_affinity_mask(mask: u64) -> Option<String> {
+    if mask == 0 {
+        return None;
+    }
+    let mut ranges = Vec::new();
+    let mut cpu = 0;
+    while cpu < u64::BITS {
+        if mask & (1u64 << cpu) == 0 {
+            cpu += 1;
+            continue;
+        }
+        let start = cpu;
+        while cpu + 1 < u64::BITS && mask & (1u64 << (cpu + 1)) != 0 {
+            cpu += 1;
+        }
+        match cpu - start {
+            0 => ranges.push(start.to_string()),
+            1 => ranges.push(format!("{start},{cpu}")),
+            _ => ranges.push(format!("{start}-{cpu}")),
+        }
+        cpu += 1;
+    }
+    Some(ranges.join(","))
+}
+
 /// Converts an NSSM affinity value to its canonical CPU-list representation.
 /// `None` represents NSSM's inherited system affinity (`All`, `Default`, or empty).
 pub fn normalize_cpu_affinity(value: &str) -> Result<Option<String>, ParseError> {
@@ -1221,6 +1248,16 @@ mod policy_tests {
             normalize_cpu_affinity("1,3-4,6"),
             Ok(Some("1,3,4,6".into()))
         );
+    }
+
+    #[test]
+    fn cpu_affinity_mask_format_matches_nssm_range_compression() {
+        assert_eq!(format_cpu_affinity_mask(0), None);
+        assert_eq!(format_cpu_affinity_mask(1), Some("0".into()));
+        assert_eq!(format_cpu_affinity_mask(0b11), Some("0,1".into()));
+        assert_eq!(format_cpu_affinity_mask(0b1111), Some("0-3".into()));
+        assert_eq!(format_cpu_affinity_mask(0b10111), Some("0-2,4".into()));
+        assert_eq!(format_cpu_affinity_mask(1u64 << 63), Some("63".into()));
     }
 
     #[test]

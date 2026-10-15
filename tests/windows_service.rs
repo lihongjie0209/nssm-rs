@@ -2115,6 +2115,85 @@ fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
 }
 
 #[test]
+fn unavailable_affinity_bits_log_effective_mask_and_constrain_the_child() {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+
+    let mut process_mask = 0usize;
+    let mut system_mask = 0usize;
+    assert_ne!(
+        unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process_mask, &mut system_mask) },
+        0,
+        "test runner affinity is queryable"
+    );
+    let unavailable_cpu = (0..usize::BITS)
+        .find(|cpu| system_mask & (1usize << cpu) == 0)
+        .expect("Windows exposes at most 64 processors in the tested process group");
+    let requested_mask = system_mask | (1usize << unavailable_cpu);
+    let requested = nssm_rs::format_cpu_affinity_mask(requested_mask as u64).unwrap();
+    let system = nssm_rs::format_cpu_affinity_mask(system_mask as u64).unwrap();
+
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let capture_path = std::env::temp_dir().join(format!("{service}_affinity.txt"));
+    let capture_path = capture_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![capture_path.clone()]);
+    let fixture = std::env::var_os("NSSM_RS_TEST_FIXTURE")
+        .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
+        .expect("process information fixture is built");
+    let fixture = fixture.to_string_lossy().into_owned();
+    assert!(cli(&["install", &service, &fixture]).status.success());
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+    let parameters = format!(
+        "capture-process-info {}",
+        nssm_rs::quote_windows_arg(&capture_path)
+    );
+    assert!(
+        cli(&["set", &service, "AppParameters", &parameters])
+            .status
+            .success()
+    );
+
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
+    let set_affinity = format!(
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppAffinity -PropertyType String -Value '{requested}' -Force"
+    );
+    assert!(
+        Command::new(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &set_affinity])
+            .status()
+            .is_ok_and(|status| status.success()),
+        "test writes a valid mask containing one unavailable CPU"
+    );
+
+    assert!(cli(&["start", &service]).status.success());
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    let captured = std::fs::read_to_string(&capture_path)
+        .expect("child reports its effective processor affinity");
+    let mut values = captured.lines();
+    assert_eq!(values.next(), Some("32"));
+    assert_eq!(
+        values.next(),
+        Some(format!("{:x}", system_mask).as_str()),
+        "unavailable affinity bits are removed before launching the child"
+    );
+
+    let escaped_service = service.replace('\'', "''");
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1068}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ $p = $event.Properties; if ($p.Count -eq 4 -and $p[0].Value -eq '{escaped_service}' -and $p[1].Value -eq '{requested}' -and $p[2].Value -eq '{system}' -and $p[3].Value -eq '{system}') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "event 1068 records requested, supported, and effective affinity masks"
+    );
+}
+
+#[test]
 fn timestamp_log_prefixes_each_child_output_line_in_utc() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
