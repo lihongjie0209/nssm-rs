@@ -50,6 +50,7 @@ const EVENT_DISPATCHER_FAILED: u32 = 0xc000_03e9;
 const EVENT_START_SERVICE_FAILED: u32 = 0xc000_03ee;
 const EVENT_STARTED_SERVICE: u32 = 0x4000_03f0;
 const EVENT_CREATEPROCESS_FAILED: u32 = 0xc000_03f2;
+const EVENT_TERMINATEPROCESS: u32 = 0x4000_03f3;
 const EVENT_ENDED_SERVICE: u32 = 0x4000_03f5;
 const EVENT_EXIT_RESTART: u32 = 0x4000_03f6;
 const EVENT_EXIT_IGNORE: u32 = 0x4000_03f7;
@@ -2616,7 +2617,17 @@ fn wait_process_for(child: &mut Child, grace: Duration) -> bool {
     }
 }
 
-fn stop_child(service: &str, child: &mut ManagedChild, no_console: bool) -> Result<(), String> {
+fn stop_child(
+    service: &str,
+    application: &str,
+    child: &mut ManagedChild,
+    no_console: bool,
+) -> Result<(), String> {
+    report_event(
+        windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+        EVENT_TERMINATEPROCESS,
+        &[service, application],
+    );
     let skip = read_reg_dword(service, "AppStopMethodSkip", 0)?;
     let pid = child.child.id();
     for method in nssm_rs::stop_methods(skip, no_console) {
@@ -3703,7 +3714,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             if let Some(mut proc) = child.take() {
                 let stop_requested = STOP_REQUESTED.load(Ordering::SeqCst);
                 if stop_requested {
-                    let _ = stop_child(&service_name, &mut proc, no_console);
+                    let _ = stop_child(&service_name, &app, &mut proc, no_console);
                 }
                 if let Ok(status) = proc.child.wait() {
                     if STOP_REQUESTED.load(Ordering::SeqCst) {

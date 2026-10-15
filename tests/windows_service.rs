@@ -962,6 +962,26 @@ fn logs_successful_child_process_starts_to_the_application_event_log() {
         "Application log contains NSSM event 1008 with executable, arguments and service"
     );
     assert!(cli(&["stop", &service]).status.success());
+
+    let script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1011}} -MaxEvents 40 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq '{application}' -and $event.Message.Contains('Killing process')) {{ exit 0 }} }}; exit 1"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut event_found = false;
+    while Instant::now() < deadline {
+        event_found = Command::new(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .is_ok_and(|status| status.success());
+        if event_found {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        event_found,
+        "Application log contains NSSM event 1011 with service and application values"
+    );
 }
 
 #[test]
