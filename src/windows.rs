@@ -2608,6 +2608,9 @@ fn read_optional_reg_string(service: &str, value: &str) -> Result<Option<String>
             &mut key,
         )
     };
+    if code == 2 {
+        return Ok(None);
+    }
     if code != 0 {
         return Err(registry_error(code));
     }

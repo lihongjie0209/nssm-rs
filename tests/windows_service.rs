@@ -201,6 +201,59 @@ impl Drop for Cleanup {
     }
 }
 
+struct NativeServiceCleanup(String);
+impl Drop for NativeServiceCleanup {
+    fn drop(&mut self) {
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let _ = Command::new(format!("{windows}\\System32\\sc.exe"))
+            .args(["delete", &self.0])
+            .output();
+    }
+}
+
+#[test]
+fn dump_exports_native_service_metadata() {
+    let service = unique_service_name();
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let sc = format!("{windows}\\System32\\sc.exe");
+    let created = Command::new(&sc)
+        .args([
+            "create",
+            &service,
+            "binPath=",
+            "C:\\Windows\\System32\\cmd.exe /c exit",
+            "start=",
+            "demand",
+            "type=",
+            "own",
+        ])
+        .output()
+        .expect("sc.exe starts to create a native service");
+    assert!(
+        created.status.success(),
+        "native service creation failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let _cleanup = NativeServiceCleanup(service.clone());
+
+    let dumped = cli(&["dump", &service]);
+    assert!(
+        dumped.status.success(),
+        "native dump failed: {}",
+        String::from_utf8_lossy(&dumped.stderr)
+    );
+    let output = String::from_utf8_lossy(&dumped.stdout);
+    assert!(output.contains(&format!("install {service}")), "{output}");
+    assert!(
+        output.contains(&format!("set {service} Start SERVICE_DEMAND_START")),
+        "{output}"
+    );
+    assert!(
+        output.contains(&format!("set {service} Type SERVICE_WIN32_OWN_PROCESS")),
+        "{output}"
+    );
+}
+
 #[test]
 fn installs_runs_stops_and_removes_a_real_scm_service() {
     let service = unique_service_name();
