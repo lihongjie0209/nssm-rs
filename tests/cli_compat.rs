@@ -153,6 +153,17 @@ fn parses_all_nssm_version_switch_spellings() {
 }
 
 #[test]
+fn parses_explicit_help_switches_case_insensitively() {
+    for spelling in ["help", "HELP", "-h", "--help"] {
+        assert_eq!(
+            parse_args(&args(&[spelling])).unwrap(),
+            Command::Help,
+            "help switch {spelling:?}"
+        );
+    }
+}
+
+#[test]
 fn applies_environment_overrides_additions_and_conditional_removals() {
     let original = args(&["TEMP=C:\\Temp", "PATH=base"]);
     let out = edit_environment(&original, &args(&["+temp=C:\\tmp", "NEW=yes"])).unwrap();
