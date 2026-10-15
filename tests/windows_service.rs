@@ -2207,6 +2207,15 @@ fn startup_rotation_preserves_existing_log_and_creates_a_fresh_active_file() {
                 .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
         })
         .expect("startup rotation created a timestamped backup");
+    let escaped_service = service.replace('\'', "''");
+    let escaped_prefix = prefix.replace('\'', "''");
+    let rotation_event_script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1077}} -MaxEvents 500 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{escaped_service}' -and ([string]$event.Properties[1].Value).EndsWith('{escaped_service}_startup.log') -and ([string]$event.Properties[2].Value).Contains('{escaped_prefix}')) {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&rotation_event_script),
+        "Application log contains event 1077 with the service's active and rotated log paths"
+    );
     let contents = std::fs::read_to_string(backup).expect("rotated startup log can be read");
     assert!(contents.contains("previous-run-marker"));
     assert!(!contents.contains("current-run-marker"));

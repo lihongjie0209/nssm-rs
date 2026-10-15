@@ -58,6 +58,7 @@ const EVENT_EXIT_UNCLEAN: u32 = 0x4000_03fc;
 const EVENT_RESET_THROTTLE: u32 = 0x4000_040b;
 const EVENT_THROTTLED: u32 = 0x8000_040a;
 const EVENT_RESTART_DELAY: u32 = 0x4000_0430;
+const EVENT_ROTATED: u32 = 0x4000_0435;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
@@ -124,14 +125,14 @@ impl LogDestination {
         delay: Duration,
         force: bool,
         copy_and_truncate: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<std::path::PathBuf>, String> {
         let mut file_guard = self
             .file
             .lock()
             .map_err(|_| "log destination lock poisoned".to_owned())?;
         let metadata = match fs::metadata(&self.path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.to_string()),
         };
         let modified = metadata.modified().map_err(|error| error.to_string())?;
@@ -142,7 +143,7 @@ impl LogDestination {
             minimum_size,
             force,
         ) {
-            return Ok(false);
+            return Ok(None);
         }
         let rotated = rotated_log_path(Path::new(&self.path), std::time::SystemTime::now())
             .ok_or_else(|| format!("could not create rotated name for {}", self.path))?;
@@ -192,7 +193,7 @@ impl LogDestination {
                     })?,
             );
         }
-        Ok(true)
+        Ok(Some(rotated))
     }
 
     fn reopen(&self, disposition: u32) -> io::Result<File> {
@@ -2496,16 +2497,16 @@ fn rotate_log_file(
     force: bool,
     copy_and_truncate: bool,
     live_handle: bool,
-) -> Result<bool, String> {
+) -> Result<Option<std::path::PathBuf>, String> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
     let modified = metadata.modified().map_err(|error| error.to_string())?;
     let age = modified.elapsed().unwrap_or_default();
     if !log_rotation_due(metadata.len(), age, minimum_age, minimum_size, force) {
-        return Ok(false);
+        return Ok(None);
     }
     let rotated = rotated_log_path(Path::new(path), modified)
         .ok_or_else(|| format!("could not create rotated name for {path}"))?;
@@ -2523,7 +2524,15 @@ fn rotate_log_file(
     } else {
         fs::rename(path, &rotated).map_err(|error| format!("unable to rename {path}: {error}"))?;
     }
-    Ok(true)
+    Ok(Some(rotated))
+}
+
+fn report_rotation_event(service: &str, path: &str, rotated: &std::path::Path) {
+    report_event(
+        windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+        EVENT_ROTATED,
+        &[service, path, &rotated.to_string_lossy()],
+    );
 }
 
 unsafe extern "system" fn post_close_to_process_window(hwnd: HWND, target_pid: LPARAM) -> i32 {
@@ -3198,7 +3207,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 (stderr_path.as_deref(), stderr_copy_and_truncate),
             ] {
                 if let Some(path) = path {
-                    let _ = rotate_log_file(
+                    if let Ok(Some(rotated)) = rotate_log_file(
                         path,
                         Duration::from_secs(rotate_seconds as u64),
                         rotate_size,
@@ -3206,7 +3215,9 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                         false,
                         copy,
                         false,
-                    );
+                    ) {
+                        report_rotation_event(&service_name, path, &rotated);
+                    }
                 }
             }
         }
@@ -3559,16 +3570,16 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                         stderr_copy_and_truncate,
                     ),
                 ] {
-                    if let Some(destination) = destination {
-                        let _ = destination.rotate(
+                    let rotation = if let Some(destination) = destination {
+                        destination.rotate(
                             Duration::from_secs(rotate_seconds as u64),
                             rotate_size,
                             rotate_delay,
                             requested_rotation,
                             copy,
-                        );
+                        )
                     } else if let Some(path) = path {
-                        let _ = rotate_log_file(
+                        rotate_log_file(
                             path,
                             Duration::from_secs(rotate_seconds as u64),
                             rotate_size,
@@ -3576,7 +3587,12 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                             requested_rotation,
                             copy,
                             false,
-                        );
+                        )
+                    } else {
+                        continue;
+                    };
+                    if let (Some(path), Ok(Some(rotated))) = (path, rotation) {
+                        report_rotation_event(&service_name, path, &rotated);
                     }
                 }
                 let _ = invoke_hook(
