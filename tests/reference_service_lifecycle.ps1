@@ -212,17 +212,19 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     if ($result.ExitCode -eq 0) {
         throw 'set Name unexpectedly succeeded'
     }
-    $imagePath = Add-Result $results $Binary 'get ImagePath before native update' `
-        @('get', $Service, 'ImagePath')
-    $imagePathValue = [Text.Encoding]::Default.GetString(
-        [Convert]::FromBase64String($imagePath.Stdout)).Trim()
-    Add-Result $results $Binary 'set ImagePath to current value' `
-        @('set', $Service, 'ImagePath', $imagePathValue) | Out-Null
+    $serviceConfig = Get-CimInstance -ClassName Win32_Service -Filter "Name='$Service'"
+    if (-not $serviceConfig -or -not $serviceConfig.PathName) {
+        throw "Unable to read the original SCM image path for $Service"
+    }
+    $originalImagePath = [string] $serviceConfig.PathName
+    $probeImagePath = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    Add-Result $results $Binary 'set ImagePath' `
+        @('set', $Service, 'ImagePath', $probeImagePath) | Out-Null
     $imagePathAfterSet = Add-Result $results $Binary 'get ImagePath after native update' `
         @('get', $Service, 'ImagePath')
-    if ($imagePath.Stdout -cne $imagePathAfterSet.Stdout) {
-        throw 'setting ImagePath to its current value changed the service image path'
-    }
+    Assert-SettingValue $imagePathAfterSet $probeImagePath 'get ImagePath after native update'
+    Add-Result $results $Binary 'restore ImagePath' `
+        @('set', $Service, 'ImagePath', $originalImagePath) | Out-Null
     $temporary = $env:TEMP
     foreach ($setting in @(
         @{ Name = 'AppParameters'; Value = '--label "two words"'; Default = '' },
