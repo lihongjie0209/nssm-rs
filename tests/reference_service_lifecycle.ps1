@@ -377,7 +377,7 @@ function Run-FailedRestartScenario([string] $Binary, [string] $Service) {
     try {
         Copy-Item -LiteralPath $cmd -Destination $application -Force
         Add-Result $results $Binary 'failed restart install' `
-            @('install', $Service, $application, '/c', 'exit 23') | Out-Null
+            @('install', $Service, $application, '/c', 'timeout /t 5 /nobreak >nul & exit /b 23') | Out-Null
         Add-Result $results $Binary 'failed restart set AppExit' `
             @('set', $Service, 'AppExit', '23', 'Restart') | Out-Null
         Add-Result $results $Binary 'failed restart set delay' `
@@ -386,6 +386,7 @@ function Run-FailedRestartScenario([string] $Binary, [string] $Service) {
         $startedAt = Get-Date
         Add-Result $results $Binary 'failed restart start' `
             @('start', $Service) @(0, 1) | Out-Null
+        Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
         Wait-ServiceState $Binary $Service 'SERVICE_PAUSED'
         Add-Result $results $Binary 'failed restart status during delay' `
             @('status', $Service) | Out-Null
