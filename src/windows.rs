@@ -1689,7 +1689,7 @@ fn reset_native_setting(service: &str, parameter: &str, extra: &[String]) -> Res
             let parameter = canonical_setting_name(parameter);
             let service = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());
             Err(format!(
-                "Parameter \"{parameter}\" has no meaningful default value! Error setting parameter \"{parameter}\" for service \"{service}\"!"
+                "Parameter \"{parameter}\" has no meaningful default value!\r\r\nError setting parameter \"{parameter}\" for service \"{service}\"!"
             ))
         }
         _ => {
