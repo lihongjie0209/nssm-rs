@@ -193,6 +193,10 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     }
     Compare-StringSetting $results $Binary $Service 'AppExit' 'Ignore' 'Restart' '23'
     Compare-StringSetting $results $Binary $Service 'AppEvents' 'cmd.exe /c exit 0' $null 'Start/Pre'
+    Add-Result $results $Binary 'restore AppParameters' `
+        @('set', $Service, 'AppParameters', '-t 127.0.0.1') | Out-Null
+    Add-Result $results $Binary 'clear AppDirectory' `
+        @('set', $Service, 'AppDirectory', '') | Out-Null
     Add-Result $results $Binary 'start' @('start', $Service) | Out-Null
     Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
     Add-Result $results $Binary 'status running' @('status', $Service) | Out-Null
