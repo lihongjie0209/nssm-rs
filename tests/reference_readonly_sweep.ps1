@@ -65,6 +65,17 @@ $cases = @(
     @{ Name = 'unknown setting on native service'; Args = @('get', 'Spooler', 'DefinitelyNotASetting') }
 )
 
+# NSSM validates required subparameters before opening SCM services. These
+# recognized commands emit ordinary diagnostics and cannot enter usage().
+foreach ($command in @('get', 'set', 'reset', 'unset')) {
+    foreach ($setting in @('AppExit', 'AppEvents')) {
+        $cases += @{
+            Name = "$command missing $setting subparameter"
+            Args = @($command, 'NssmRDefinitelyMissingService', $setting)
+        }
+    }
+}
+
 # Version output names each executable, so compare its command contract instead
 # of requiring the reference and candidate identity strings to match.
 foreach ($versionSwitch in @(
