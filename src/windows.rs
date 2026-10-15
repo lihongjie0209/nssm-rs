@@ -3250,25 +3250,60 @@ fn read_reg_dword(service: &str, value: &str, default: u32) -> Result<u32, Strin
 }
 
 fn read_stop_method_skip(service: &str) -> u32 {
-    match read_reg_dword(service, "AppStopMethodSkip", 0) {
-        Ok(value) => value,
-        Err(error) if error.contains("AppStopMethodSkip is not a DWORD") => {
-            report_event(
-                windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
-                EVENT_BOGUS_STOP_METHOD_SKIP,
-                &[service, "AppStopMethodSkip", "NSSM"],
-            );
-            0
-        }
+    let key = match open_service_registry(service, false, KEY_QUERY_VALUE) {
+        Ok(key) => key,
         Err(error) => {
             report_event(
                 EVENTLOG_ERROR_TYPE,
                 EVENT_QUERYVALUE_FAILED,
                 &["AppStopMethodSkip", &error],
             );
-            0
+            return 0;
         }
+    };
+    let value_name = wide(OsStr::new("AppStopMethodSkip"));
+    let mut kind = 0;
+    let mut data = 0u32;
+    let mut bytes = std::mem::size_of::<u32>() as u32;
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            value_name.as_ptr(),
+            ptr::null(),
+            &mut kind,
+            (&mut data as *mut u32).cast(),
+            &mut bytes,
+        )
+    };
+    if code == 2 {
+        return 0;
     }
+    if kind != REG_DWORD {
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+            EVENT_BOGUS_STOP_METHOD_SKIP,
+            &[service, "AppStopMethodSkip", "NSSM"],
+        );
+        return 0;
+    }
+    if code != 0 {
+        let error = registry_error(code);
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_QUERYVALUE_FAILED,
+            &["AppStopMethodSkip", &error],
+        );
+        return 0;
+    }
+    if bytes != std::mem::size_of::<u32>() as u32 {
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+            EVENT_BOGUS_STOP_METHOD_SKIP,
+            &[service, "AppStopMethodSkip", "NSSM"],
+        );
+        return 0;
+    }
+    data
 }
 
 #[derive(Debug)]
