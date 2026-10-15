@@ -60,6 +60,20 @@ fn no_arguments_print_usage_to_stderr_and_return_usage_exit_status() {
 
 #[cfg(windows)]
 #[test]
+fn missing_exit_or_hook_subparameters_precede_missing_service_lookup() {
+    for command in ["get", "set", "reset", "unset"] {
+        for setting in ["AppExit", "AppEvents"] {
+            let result = run(&[command, "NssmRDefinitelyMissingService", setting]);
+            assert_eq!(result.status.code(), Some(1), "{command} {setting}");
+            assert!(result.stdout.is_empty(), "{command} {setting}");
+            let expected = format!("Parameter \"{setting}\" requires a subparameter!\r\r\n");
+            assert_eq!(result.stderr, expected.as_bytes(), "{command} {setting}");
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn unknown_native_service_setting_lists_supported_parameters() {
     let result = run(&["get", "Schedule", "DefinitelyNotASetting"]);
     assert_eq!(result.status.code(), Some(1));

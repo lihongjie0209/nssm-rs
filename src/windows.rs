@@ -5911,21 +5911,40 @@ pub fn execute(command: Command) -> Result<u8, String> {
         print_invalid_parameter(parameter);
         return Ok(1);
     }
+    let missing_subparameter = match &command {
+        Command::Get {
+            parameter, extra, ..
+        }
+        | Command::Reset {
+            parameter, extra, ..
+        }
+        | Command::Unset {
+            parameter, extra, ..
+        } if (parameter.eq_ignore_ascii_case("AppExit")
+            || parameter.eq_ignore_ascii_case("AppEvents"))
+            && extra.is_empty() =>
+        {
+            Some(parameter.as_str())
+        }
+        Command::Set {
+            parameter, values, ..
+        } if (parameter.eq_ignore_ascii_case("AppExit")
+            || parameter.eq_ignore_ascii_case("AppEvents"))
+            && values.is_empty() =>
+        {
+            Some(parameter.as_str())
+        }
+        _ => None,
+    };
+    if let Some(parameter) = missing_subparameter {
+        cli_eprintln!("Parameter \"{parameter}\" requires a subparameter!\r\r");
+        return Ok(1);
+    }
     if let Some(service) = service
         && let Some(error) = missing_service_error(service)
     {
         print_open_service_error(&error);
         return Ok(3);
-    }
-    if let Command::Get {
-        parameter, extra, ..
-    } = &command
-        && extra.is_empty()
-        && (parameter.eq_ignore_ascii_case("AppExit")
-            || parameter.eq_ignore_ascii_case("AppEvents"))
-    {
-        cli_eprintln!("Parameter \"{parameter}\" requires a subparameter!\r\r");
-        return Ok(1);
     }
     let managed_parameter = match &command {
         Command::Get {
