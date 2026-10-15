@@ -73,6 +73,18 @@ function Add-Result([System.Collections.Generic.List[object]] $Results, [string]
     return $result
 }
 
+function Add-ObservedResult([System.Collections.Generic.List[object]] $Results,
+    [string] $Binary, [string] $Label, [string[]] $Arguments) {
+    $result = Invoke-Cli $Binary $Arguments
+    $Results.Add([pscustomobject]@{
+        Label = $Label
+        ExitCode = $result.ExitCode
+        Stdout = $result.Stdout
+        Stderr = $result.Stderr
+    })
+    return $result
+}
+
 function Wait-ServiceState([string] $Binary, [string] $Service, [string] $State) {
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
         $result = Invoke-Cli $Binary @('status', $Service)
@@ -176,6 +188,34 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
         $reset = Add-Result $results $Binary "get default $($setting.Name)" `
             @('get', $Service, $setting.Name)
         Assert-SettingValue $reset $setting.Default "get default $($setting.Name)"
+    }
+    foreach ($setting in @(
+        @{ Name = 'AppNoConsole'; Invalid = 'not-a-number' },
+        @{ Name = 'AppPriority'; Invalid = 'NOT_A_PRIORITY_CLASS' },
+        @{ Name = 'AppRotateBytes'; Invalid = 'not-a-number' },
+        @{ Name = 'AppAffinity'; Invalid = 'not-a-cpu-list' }
+    )) {
+        $getArguments = @('get', $Service, $setting.Name)
+        $before = Add-Result $results $Binary "get before invalid set $($setting.Name)" $getArguments
+        $invalid = Add-ObservedResult $results $Binary "reject invalid set $($setting.Name)" `
+            @('set', $Service, $setting.Name, $setting.Invalid)
+        if ($invalid.ExitCode -eq 0) {
+            throw "set $($setting.Name) accepted invalid value [$($setting.Invalid)]"
+        }
+        $after = Add-Result $results $Binary "get after invalid set $($setting.Name)" $getArguments
+        if ($before.Stdout -cne $after.Stdout) {
+            throw "invalid set $($setting.Name) changed the stored value"
+        }
+    }
+    foreach ($setting in @(
+        @{ Name = 'Name'; Value = 'NssmRChangedName' },
+        @{ Name = 'ImagePath'; Value = 'C:\NssmRChangedImage.exe' }
+    )) {
+        $result = Add-ObservedResult $results $Binary "reject set $($setting.Name)" `
+            @('set', $Service, $setting.Name, $setting.Value)
+        if ($result.ExitCode -eq 0) {
+            throw "set $($setting.Name) unexpectedly succeeded"
+        }
     }
     $temporary = $env:TEMP
     foreach ($setting in @(
