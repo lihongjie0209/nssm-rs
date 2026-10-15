@@ -402,8 +402,27 @@ for ($index = 0; $index -lt $referenceResults.Count; $index++) {
         if ($reference.Label -eq 'dump configured service') {
             $referenceLines = @($referenceStdout -split "`r?`n" | Where-Object { $_ })
             $candidateLines = @($candidateStdout -split "`r?`n" | Where-Object { $_ })
+            Write-Host "Dump line counts: reference=$($referenceLines.Count), candidate=$($candidateLines.Count)"
             foreach ($difference in Compare-Object $referenceLines $candidateLines) {
                 Write-Host "Dump difference $($difference.SideIndicator): $($difference.InputObject)"
+            }
+            $referenceBytes = [Convert]::FromBase64String($reference.Stdout)
+            $candidateBytes = [Convert]::FromBase64String($candidate.Stdout)
+            $firstByteDifference = -1
+            for ($byteIndex = 0; $byteIndex -lt [Math]::Min($referenceBytes.Length, $candidateBytes.Length); $byteIndex++) {
+                if ($referenceBytes[$byteIndex] -ne $candidateBytes[$byteIndex]) {
+                    $firstByteDifference = $byteIndex
+                    break
+                }
+            }
+            Write-Host "Dump byte lengths: reference=$($referenceBytes.Length), candidate=$($candidateBytes.Length), first-difference=$firstByteDifference"
+            for ($lineIndex = 0; $lineIndex -lt [Math]::Max($referenceLines.Count, $candidateLines.Count); $lineIndex++) {
+                $referenceLine = if ($lineIndex -lt $referenceLines.Count) { $referenceLines[$lineIndex] } else { '<missing>' }
+                $candidateLine = if ($lineIndex -lt $candidateLines.Count) { $candidateLines[$lineIndex] } else { '<missing>' }
+                if ($referenceLine -cne $candidateLine) {
+                    Write-Host "Dump line $lineIndex reference=[$referenceLine] candidate=[$candidateLine]"
+                    break
+                }
             }
         }
         throw "Lifecycle mismatch at $($reference.Label): reference exit=$($reference.ExitCode), candidate exit=$($candidate.ExitCode)`nReference stdout: [$referenceStdout]`nCandidate stdout: [$candidateStdout]`nReference stderr: [$referenceStderr]`nReference stderr hex: [$referenceStderrHex]`nCandidate stderr: [$candidateStderr]`nCandidate stderr hex: [$candidateStderrHex]"
