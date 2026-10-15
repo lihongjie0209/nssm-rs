@@ -201,6 +201,30 @@ impl Drop for Cleanup {
     }
 }
 
+struct ProcessCleanup(u32);
+impl Drop for ProcessCleanup {
+    fn drop(&mut self) {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
+        };
+        let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, self.0) };
+        if !process.is_null() {
+            unsafe {
+                TerminateProcess(process, 0);
+                CloseHandle(process);
+            }
+        }
+    }
+}
+
+struct RestoreStopMethods(String);
+impl Drop for RestoreStopMethods {
+    fn drop(&mut self) {
+        let _ = cli(&["set", &self.0, "AppStopMethodSkip", "0"]);
+    }
+}
+
 struct NativeServiceCleanup(String);
 impl Drop for NativeServiceCleanup {
     fn drop(&mut self) {
@@ -1436,6 +1460,74 @@ fn stopping_service_terminates_descendant_processes() {
     assert!(
         wait_for_windows_powershell_condition(&event_script),
         "Application log contains process-tree events 1023 and 1027 for both descendants"
+    );
+}
+
+#[test]
+fn skipped_termination_stops_service_and_logs_the_active_child() {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    };
+
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let _restore_stop_methods = RestoreStopMethods(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let ping = format!("{windows}\\System32\\PING.EXE");
+    let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppStopMethodSkip", "15"])
+            .status
+            .success()
+    );
+    assert!(cli(&["start", &service]).status.success());
+    assert!(wait_for_service_state(&service, "SERVICE_RUNNING"));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let pid = loop {
+        let tree = cli(&["processes", &service]);
+        let pid = String::from_utf8_lossy(&tree.stdout)
+            .lines()
+            .find(|line| line.to_ascii_uppercase().contains("PING.EXE"))
+            .and_then(|line| line.split_whitespace().next())
+            .and_then(|value| value.parse::<u32>().ok());
+        if let Some(pid) = pid {
+            break pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "process tree did not expose the ping PID"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
+    let _process_cleanup = ProcessCleanup(pid);
+
+    assert!(cli(&["stop", &service]).status.success());
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    assert!(
+        !process.is_null(),
+        "skipped child remains openable after service stop"
+    );
+    assert_eq!(
+        unsafe { WaitForSingleObject(process, 0) },
+        WAIT_TIMEOUT,
+        "skipped child remains alive after service stop"
+    );
+    unsafe { CloseHandle(process) };
+
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1053}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 4 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq {pid} -and $event.Properties[2].Value -eq 'NSSM' -and $event.Properties[3].Value -eq 'AppStopMethodSkip') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "event 1053 identifies the still-running process and skipped stop methods"
     );
 }
 

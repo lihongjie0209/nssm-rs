@@ -58,6 +58,7 @@ use windows_sys::Win32::Foundation::SetLastError;
 
 const DELETE_ACCESS: u32 = 0x0001_0000;
 const STOP_SKIP_CONSOLE: u32 = 1;
+const STOP_SKIP_TERMINATE: u32 = 8;
 const SERVICE_INTERACTIVE_PROCESS_FLAG: u32 = 0x100;
 const EVENT_DISPATCHER_FAILED: u32 = 0xc000_03e9;
 const EVENT_OPENSCMANAGER_FAILED: u32 = 0xc000_03ea;
@@ -104,6 +105,7 @@ const EVENT_GET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0x8000_042d;
 const EVENT_SET_PROCESS_AFFINITY_MASK_FAILED: u32 = 0xc000_042e;
 const EVENT_BOGUS_STOP_METHOD_SKIP: u32 = 0x8000_041c;
 const EVENT_PRESTART_HOOK_ABORT: u32 = 0xc000_0437;
+const EVENT_PROCESS_STILL_ACTIVE: u32 = 0x8000_041d;
 const EVENT_QUERYVALUE_FAILED: u32 = 0xc000_03fa;
 const PRIORITY_CLASS_MASK: u32 = 0x0000_c1e0;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
@@ -2009,10 +2011,7 @@ impl Drop for ManagedChild {
     }
 }
 
-fn assign_to_kill_on_close_job(
-    mut child: Child,
-    kill_process_tree: bool,
-) -> Result<ManagedChild, String> {
+fn assign_to_job(mut child: Child, kill_process_tree: bool) -> Result<ManagedChild, String> {
     if !kill_process_tree {
         return Ok(ManagedChild { child, job: 0 });
     }
@@ -2021,17 +2020,7 @@ fn assign_to_kill_on_close_job(
         let _ = child.kill();
         return Err(io::Error::last_os_error().to_string());
     }
-    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    let set = unsafe {
-        SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-            std::mem::size_of_val(&limits) as u32,
-        )
-    };
-    if set == 0 || unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) } == 0 {
+    if unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) } == 0 {
         let error = io::Error::last_os_error().to_string();
         let _ = child.kill();
         unsafe {
@@ -3698,7 +3687,7 @@ fn wait_process_for(child: &mut Child, grace: Duration) -> bool {
     }
 }
 
-fn report_process_tree_termination(service: &str, root: u32, exit_code: u32) {
+fn report_process_tree_events(service: &str, root: u32, exit_code: u32, report_still_active: bool) {
     let snapshot = match process_snapshot() {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -3752,6 +3741,7 @@ fn report_process_tree_termination(service: &str, root: u32, exit_code: u32) {
         pid: u32,
         parent: u32,
         exit_code: u32,
+        report_still_active: bool,
         children: &HashMap<u32, Vec<u32>>,
         seen: &mut HashSet<u32>,
     ) {
@@ -3781,11 +3771,31 @@ fn report_process_tree_termination(service: &str, root: u32, exit_code: u32) {
                 EVENT_KILL_PROCESS_TREE,
                 &[&pid_text, &parent_text, service],
             );
+            if report_still_active {
+                let mut process_exit_code = 0;
+                if unsafe { GetExitCodeProcess(process, &mut process_exit_code) } == 0
+                    || process_exit_code == windows_sys::Win32::Foundation::STILL_ACTIVE as u32
+                {
+                    report_event(
+                        windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                        EVENT_PROCESS_STILL_ACTIVE,
+                        &[service, &pid_text, "NSSM", "AppStopMethodSkip"],
+                    );
+                }
+            }
             unsafe { CloseHandle(process) };
         }
         if let Some(descendants) = children.get(&pid) {
             for descendant in descendants {
-                visit(service, *descendant, pid, exit_code, children, seen);
+                visit(
+                    service,
+                    *descendant,
+                    pid,
+                    exit_code,
+                    report_still_active,
+                    children,
+                    seen,
+                );
             }
         }
     }
@@ -3796,9 +3806,15 @@ fn report_process_tree_termination(service: &str, root: u32, exit_code: u32) {
         root,
         std::process::id(),
         exit_code,
+        report_still_active,
         &children,
         &mut seen,
     );
+}
+
+enum StopChildOutcome {
+    Exited { tree_events_logged: bool },
+    StillActive,
 }
 
 fn stop_child(
@@ -3807,7 +3823,7 @@ fn stop_child(
     child: &mut ManagedChild,
     no_console: bool,
     skip: u32,
-) -> Result<bool, String> {
+) -> Result<StopChildOutcome, String> {
     report_event(
         windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
         EVENT_TERMINATEPROCESS,
@@ -3827,12 +3843,12 @@ fn stop_child(
                 signal(pid);
                 let delay = read_reg_dword(service, setting, 1500)?;
                 if wait_process_for(&mut child.child, Duration::from_millis(delay as u64)) {
-                    return Ok(tree_events_logged);
+                    return Ok(StopChildOutcome::Exited { tree_events_logged });
                 }
             }
             StopMethod::Terminate => {
                 if child.job != 0 {
-                    report_process_tree_termination(service, pid, 0);
+                    report_process_tree_events(service, pid, 0, false);
                     tree_events_logged = true;
                     if unsafe { TerminateJobObject(child.job as HANDLE, 0) } == 0 {
                         unsafe {
@@ -3845,15 +3861,15 @@ fn stop_child(
             }
         }
     }
-    while child
-        .child
-        .try_wait()
-        .map_err(|error| error.to_string())?
-        .is_none()
+    if skip & STOP_SKIP_TERMINATE != 0
+        && child.child.try_wait().map_err(|e| e.to_string())?.is_none()
     {
+        return Ok(StopChildOutcome::StillActive);
+    }
+    while child.child.try_wait().map_err(|e| e.to_string())?.is_none() {
         thread::sleep(Duration::from_millis(100));
     }
-    Ok(tree_events_logged)
+    Ok(StopChildOutcome::Exited { tree_events_logged })
 }
 
 fn read_exit_rule(service: &str, exit_code: Option<u32>) -> Result<Option<ExitAction>, String> {
@@ -5058,7 +5074,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 log_stream(pipe, destination, timestamp_stderr)
             }));
         }
-        let mut launched = match assign_to_kill_on_close_job(process, kill_process_tree) {
+        let mut launched = match assign_to_job(process, kill_process_tree) {
             Ok(launched) => launched,
             Err(_) => {
                 set_status(SERVICE_STOPPED, 2, 0);
@@ -5241,6 +5257,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             );
             stop_hook_invoked = true;
         }
+        let mut child_still_active = false;
         if let Ok(mut child) = CHILD_PROCESS.lock()
             && let Some(mut proc) = child.take()
         {
@@ -5248,20 +5265,42 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             let mut tree_events_logged = false;
             if stop_requested {
                 stop_process_handled = true;
-                tree_events_logged =
-                    stop_child(&service_name, &app, &mut proc, no_console, stop_method_skip)
-                        .unwrap_or(false);
+                match stop_child(&service_name, &app, &mut proc, no_console, stop_method_skip) {
+                    Ok(StopChildOutcome::Exited {
+                        tree_events_logged: logged,
+                    }) => tree_events_logged = logged,
+                    Ok(StopChildOutcome::StillActive) => {
+                        child_still_active = true;
+                        child_exit_code = windows_sys::Win32::Foundation::STILL_ACTIVE as u32;
+                        if kill_process_tree {
+                            report_process_tree_events(
+                                &service_name,
+                                proc.child.id(),
+                                child_exit_code,
+                                true,
+                            );
+                            tree_events_logged = true;
+                        }
+                    }
+                    Err(_) => {}
+                }
             }
-            if let Ok(status) = proc.child.wait()
-                && STOP_REQUESTED.load(Ordering::SeqCst)
-            {
-                child_exit_code = status.code().unwrap_or(1) as u32;
+            if !child_still_active {
+                if let Ok(status) = proc.child.wait()
+                    && STOP_REQUESTED.load(Ordering::SeqCst)
+                {
+                    child_exit_code = status.code().unwrap_or(1) as u32;
+                }
             }
             if proc.job != 0 && !tree_events_logged {
-                report_process_tree_termination(&service_name, proc.child.id(), child_exit_code);
+                report_process_tree_events(&service_name, proc.child.id(), child_exit_code, false);
             }
         }
-        if logger_threads
+        if child_still_active {
+            // Let redirected output drain until the service host exits; joining
+            // here would keep the stopped service alive behind the orphaned child.
+            drop(logger_threads);
+        } else if logger_threads
             .into_iter()
             .any(|logger| logger.join().map_or(true, |result| result.is_err()))
         {
