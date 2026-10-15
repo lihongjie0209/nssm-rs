@@ -198,10 +198,12 @@ each acceptance row has evidence.
 
 The service-main unit test invokes `RegisterServiceCtrlHandlerExW` outside an
 SCM dispatcher, producing the real Windows registration failure and verifying
-event 1005 in the Application log. The read-only Windows reference sweep now checks all 39 managed setting names
-against a native service and compares the exact stdout/stderr bytes and exit
-status. Matching evidence covers all 87 safe invocations: 83 in the last
-complete sweep and four later targeted comparisons. It caught and
+event 1005 in the Application log. The read-only Windows reference sweep checks
+all 39 managed setting names against a native service and compares exact
+stdout/stderr bytes and exit status. The latest complete sweep matched 92 safe
+invocations; together with four separately compared missing-service cases,
+recorded evidence covers 96 comparisons. The sweep also verifies all nine NSSM
+version switch forms by success status and output stream contract. It caught and
 resolved the extra carriage return NSSM emits for managed-setting rejection,
 the missing-subparameter
 precedence for `AppExit` and `AppEvents`, and the process-open error's system
