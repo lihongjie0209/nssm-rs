@@ -98,6 +98,10 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     Add-Result $results $Binary 'get Description' @('get', $Service, 'Description') | Out-Null
     Add-Result $results $Binary 'reset Description' @('reset', $Service, 'Description') | Out-Null
     Add-Result $results $Binary 'get reset Description' @('get', $Service, 'Description') | Out-Null
+    Add-Result $results $Binary 'set AppThrottle' @('set', $Service, 'appthrottle', '7000') | Out-Null
+    Add-Result $results $Binary 'get AppThrottle' @('get', $Service, 'AppThrottle') | Out-Null
+    Add-Result $results $Binary 'set AppThrottle default' @('set', $Service, 'AppThrottle', '1500') | Out-Null
+    Add-Result $results $Binary 'get default AppThrottle' @('get', $Service, 'AppThrottle') | Out-Null
     Add-Result $results $Binary 'start' @('start', $Service) | Out-Null
     Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
     Add-Result $results $Binary 'status running' @('status', $Service) | Out-Null
