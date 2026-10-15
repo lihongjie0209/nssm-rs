@@ -242,6 +242,18 @@ function Run-Scenario([string] $Binary, [string] $Service, [string] $Application
     Add-Result $results $Binary 'start' @('start', $Service) | Out-Null
     Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
     Add-Result $results $Binary 'status running' @('status', $Service) | Out-Null
+    Add-Result $results $Binary 'restart' @('restart', $Service) | Out-Null
+    Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
+    Add-Result $results $Binary 'status after restart' @('status', $Service) | Out-Null
+    $pause = Add-Result $results $Binary 'pause' @('pause', $Service) @(0, 1)
+    if ($pause.ExitCode -eq 0) {
+        Wait-ServiceState $Binary $Service 'SERVICE_PAUSED'
+    }
+    $continue = Add-Result $results $Binary 'continue' @('continue', $Service) @(0, 1)
+    if ($continue.ExitCode -eq 0) {
+        Wait-ServiceState $Binary $Service 'SERVICE_RUNNING'
+    }
+    Add-Result $results $Binary 'rotate' @('rotate', $Service) @(0, 1) | Out-Null
     Add-Result $results $Binary 'start already running' @('start', $Service) @(1) | Out-Null
     Add-Result $results $Binary 'stop' @('stop', $Service) | Out-Null
     Wait-ServiceState $Binary $Service 'SERVICE_STOPPED'
