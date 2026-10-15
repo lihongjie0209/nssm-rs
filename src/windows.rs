@@ -3586,9 +3586,10 @@ fn stop_child(
             }
             StopMethod::Terminate => {
                 if child.job != 0 {
-                    unsafe { TerminateJobObject(child.job as HANDLE, 1) };
+                    unsafe { TerminateJobObject(child.job as HANDLE, 0) };
+                } else {
+                    unsafe { TerminateProcess(child.child.as_raw_handle() as HANDLE, 0) };
                 }
-                let _ = child.child.kill();
             }
         }
     }

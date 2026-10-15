@@ -2872,6 +2872,71 @@ fn ignore_and_exit_actions_have_distinct_service_lifecycles() {
 }
 
 #[test]
+fn forced_service_stop_reports_zero_exit_code_to_exit_hook() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let exit_path = std::env::temp_dir().join(format!("{service}_stop_exit_code.txt"));
+    let exit_path = exit_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![exit_path.clone()]);
+
+    let installed = cli(&[
+        "install",
+        &service,
+        &command_prompt,
+        "/c",
+        "ping -t 127.0.0.1 >NUL",
+    ]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppStopMethodSkip", "7"])
+            .status
+            .success()
+    );
+    let hook = format!("cmd.exe /c echo exit-%NSSM_EXITCODE%>>\"{exit_path}\"");
+    let configured_hook = cli(&["set", &service, "AppEvents", "Exit/Post", &hook]);
+    assert!(
+        configured_hook.status.success(),
+        "Exit/Post hook set failed: {}",
+        String::from_utf8_lossy(&configured_hook.stderr)
+    );
+
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_RUNNING"));
+
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    let mut observed = false;
+    for _ in 0..100 {
+        if std::fs::read_to_string(&exit_path).is_ok_and(|contents| contents.trim() == "exit-0") {
+            observed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        observed,
+        "forced stop did not report exit code 0 to Exit/Post: {:?}",
+        std::fs::read_to_string(&exit_path)
+    );
+}
+
+#[test]
 fn suicide_exit_action_terminates_the_service_host_as_a_failure() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
