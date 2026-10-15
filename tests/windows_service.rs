@@ -13,6 +13,17 @@ fn cli(args: &[&str]) -> Output {
         .expect("nssm-r executable starts")
 }
 
+fn wait_for_service_state(service: &str, expected: &str) -> bool {
+    for _ in 0..100 {
+        let status = cli(&["status", service]);
+        if status.status.success() && String::from_utf8_lossy(&status.stdout).trim() == expected {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 fn unique_service_name() -> String {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -410,6 +421,72 @@ fn redirects_child_stdout_and_stderr_to_configured_files() {
         !stderr.contains("stdout-marker"),
         "stdout leaked into stderr: {stderr:?}"
     );
+}
+
+#[test]
+fn timestamp_log_prefixes_each_child_output_line_in_utc() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let output_path = std::env::temp_dir().join(format!("{service}_timestamps.log"));
+    let output_path = output_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![output_path.clone()]);
+    let installed = cli(&[
+        "install",
+        &service,
+        &command_prompt,
+        "/c",
+        "echo first-marker & echo second-marker",
+    ]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppStdout", &output_path])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppTimestampLog", "1"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(
+        wait_for_service_state(&service, "SERVICE_STOPPED"),
+        "one-shot child did not finish"
+    );
+    let output = std::fs::read_to_string(&output_path).expect("timestamp log exists");
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "unexpected timestamped log: {output:?}");
+    for (line, marker) in lines.into_iter().zip(["first-marker", "second-marker"]) {
+        assert!(
+            line.ends_with(marker),
+            "timestamped line lost child output: {line:?}"
+        );
+        let (timestamp, _) = line.split_once(": ").expect("timestamp separator exists");
+        assert_eq!(timestamp.len(), 23, "unexpected UTC timestamp: {timestamp}");
+        assert_eq!(&timestamp[4..5], "-");
+        assert_eq!(&timestamp[7..8], "-");
+        assert_eq!(&timestamp[10..11], " ");
+        assert_eq!(&timestamp[13..14], ":");
+        assert_eq!(&timestamp[16..17], ":");
+        assert_eq!(&timestamp[19..20], ".");
+    }
 }
 
 #[test]

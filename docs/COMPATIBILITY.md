@@ -106,9 +106,13 @@ job-based process-tree termination and process-tree reporting are present. Nativ
 metadata support now includes Description, DisplayName, ImagePath, ObjectName,
 Start, Type, service Environment and service/group dependency lists. Direct
 stdin/stdout/stderr file redirection, staged console/window/thread shutdown,
-startup and online/on-demand log rotation, Start/Pre, Start/Post, Stop/Pre,
-Exit/Post, Rotate and Power hooks, and configuration dump are implemented.
-Remaining acceptance scope includes exact live MoveFile versus CopyAndTruncate
-behavior, timestamped log lines, complete hook environment compatibility and
-Windows runtime execution. Do not call this a complete NSSM replacement or
+startup and online/on-demand log rotation, UTC per-line log timestamps,
+Start/Pre, Start/Post, Stop/Pre, Exit/Post, Rotate and Power hooks, and
+configuration dump are implemented. GitHub Actions now runs a dedicated
+Windows SCM smoke test that creates a real temporary service, verifies its
+configuration, starts it, checks the wrapped process and numeric state, stops
+it, removes it, and confirms it disappeared. Remaining acceptance scope includes
+exact live MoveFile versus CopyAndTruncate behavior, complete hook environment
+compatibility, broader event/error-path coverage, and command-by-command parity
+against the pinned reference. Do not call this a complete NSSM replacement or
 publish a stable release until each acceptance row has evidence.

@@ -7,8 +7,8 @@ use nssm_r::{
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
-    fs::{self, OpenOptions},
-    io,
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
     os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle, process::CommandExt},
     path::Path,
     process::{Child, Command as ProcessCommand, Stdio},
@@ -2009,7 +2009,7 @@ fn open_stdio_file(
     setting: &str,
     child_environment: &[String],
     input: bool,
-) -> Result<Option<Stdio>, String> {
+) -> Result<Option<File>, String> {
     let Some(path) = read_optional_reg_string(service, setting)? else {
         return Ok(None);
     };
@@ -2054,7 +2054,52 @@ fn open_stdio_file(
     let file = options
         .open(&path)
         .map_err(|error| format!("unable to open {setting} file {path}: {error}"))?;
-    Ok(Some(Stdio::from(file)))
+    Ok(Some(file))
+}
+
+fn utc_timestamp_prefix() -> String {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let seconds = elapsed.as_secs();
+    let days = (seconds / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    let seconds_of_day = seconds % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}.{:03}: ",
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60,
+        seconds_of_day % 60,
+        elapsed.subsec_millis()
+    )
+}
+
+fn timestamp_stream<R: Read, W: Write>(mut input: R, mut output: W) -> io::Result<()> {
+    let mut buffer = [0; 4096];
+    let mut line_start = true;
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            return output.flush();
+        }
+        for byte in &buffer[..count] {
+            if line_start {
+                output.write_all(utc_timestamp_prefix().as_bytes())?;
+            }
+            output.write_all(std::slice::from_ref(byte))?;
+            line_start = *byte == b'\n';
+        }
+    }
 }
 
 fn rotate_log_file(
@@ -2575,6 +2620,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         read_reg_dword(&service_name, "AppStdoutCopyAndTruncate", 0).unwrap_or(0) != 0;
     let stderr_copy_and_truncate =
         read_reg_dword(&service_name, "AppStderrCopyAndTruncate", 0).unwrap_or(0) != 0;
+    let timestamp_log = read_reg_dword(&service_name, "AppTimestampLog", 0).unwrap_or(0) != 0;
     let mut throttle = nssm_r::RestartThrottle::new(restart_delay_ms);
     let mut stop_hook_invoked = false;
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
@@ -2598,23 +2644,23 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         }
         let redirected_stdin =
             match open_stdio_file(&service_name, "AppStdin", &child_environment, true) {
-                Ok(file) => file.unwrap_or_else(Stdio::null),
+                Ok(file) => file.map(Stdio::from).unwrap_or_else(Stdio::null),
                 Err(_) => {
                     set_status(SERVICE_STOPPED, 2, 0);
                     return;
                 }
             };
-        let redirected_stdout =
+        let mut stdout_file =
             match open_stdio_file(&service_name, "AppStdout", &child_environment, false) {
-                Ok(file) => file.unwrap_or_else(Stdio::null),
+                Ok(file) => file,
                 Err(_) => {
                     set_status(SERVICE_STOPPED, 2, 0);
                     return;
                 }
             };
-        let redirected_stderr =
+        let mut stderr_file =
             match open_stdio_file(&service_name, "AppStderr", &child_environment, false) {
-                Ok(file) => file.unwrap_or_else(Stdio::null),
+                Ok(file) => file,
                 Err(_) => {
                     set_status(SERVICE_STOPPED, 2, 0);
                     return;
@@ -2643,6 +2689,24 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         if STOP_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
+        let timestamp_stdout = timestamp_log && stdout_path.is_some();
+        let timestamp_stderr = timestamp_log && stderr_path.is_some();
+        let redirected_stdout = if timestamp_stdout {
+            Stdio::piped()
+        } else {
+            stdout_file
+                .take()
+                .map(Stdio::from)
+                .unwrap_or_else(Stdio::null)
+        };
+        let redirected_stderr = if timestamp_stderr {
+            Stdio::piped()
+        } else {
+            stderr_file
+                .take()
+                .map(Stdio::from)
+                .unwrap_or_else(Stdio::null)
+        };
         let mut command = ProcessCommand::new(&app);
         command
             .args(&args)
@@ -2688,12 +2752,26 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 }
             }
         }
-        let launched = match command
-            .spawn()
-            .map_err(|e| e.to_string())
-            .and_then(|child| assign_to_kill_on_close_job(child, kill_process_tree))
-        {
-            Ok(child) => child,
+        let mut process = match command.spawn() {
+            Ok(process) => process,
+            Err(_) => {
+                set_status(SERVICE_STOPPED, 2, 0);
+                return;
+            }
+        };
+        let mut logger_threads = Vec::new();
+        if timestamp_stdout {
+            if let (Some(pipe), Some(file)) = (process.stdout.take(), stdout_file.take()) {
+                logger_threads.push(thread::spawn(move || timestamp_stream(pipe, file)));
+            }
+        }
+        if timestamp_stderr {
+            if let (Some(pipe), Some(file)) = (process.stderr.take(), stderr_file.take()) {
+                logger_threads.push(thread::spawn(move || timestamp_stream(pipe, file)));
+            }
+        }
+        let launched = match assign_to_kill_on_close_job(process, kill_process_tree) {
+            Ok(launched) => launched,
             Err(_) => {
                 set_status(SERVICE_STOPPED, 2, 0);
                 return;
@@ -2879,6 +2957,12 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                     }
                 }
             }
+        }
+        if logger_threads
+            .into_iter()
+            .any(|logger| logger.join().map_or(true, |result| result.is_err()))
+        {
+            child_exit_code = 2;
         }
         let _ = invoke_hook(
             &service_name,
