@@ -748,6 +748,12 @@ fn verify_live_rotation(copy_and_truncate: bool) {
                 .success()
         );
     }
+    let configured_copy_mode = cli(&["get", &service, "AppStdoutCopyAndTruncate"]);
+    assert!(configured_copy_mode.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&configured_copy_mode.stdout).trim(),
+        if copy_and_truncate { "1" } else { "0" }
+    );
     assert!(cli(&["start", &service]).status.success());
     let mut has_output = false;
     for _ in 0..100 {
@@ -806,7 +812,7 @@ fn verify_live_rotation(copy_and_truncate: bool) {
     assert_eq!(
         current_file_identity == original_file_identity,
         copy_and_truncate,
-        "live rotation did not preserve the expected active file identity"
+        "live rotation did not preserve the expected active file identity: before={original_file_identity:?}, after={current_file_identity:?}"
     );
     let stopped = cli(&["stop", &service]);
     assert!(
