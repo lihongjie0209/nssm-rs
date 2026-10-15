@@ -1,0 +1,111 @@
+#![cfg(windows)]
+
+use std::{
+    process::{Command, Output},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+fn cli(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_nssm-r"))
+        .args(args)
+        .output()
+        .expect("nssm-r starts")
+}
+
+fn service_name() -> String {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the epoch")
+        .as_nanos();
+    format!("NssmRSmoke{}_{}", std::process::id(), stamp)
+}
+
+struct ServiceCleanup(String);
+
+impl Drop for ServiceCleanup {
+    fn drop(&mut self) {
+        let _ = cli(&["stop", &self.0]);
+        let _ = cli(&["remove", &self.0, "confirm"]);
+    }
+}
+
+fn wait_for_state(service: &str, expected: &str) -> bool {
+    for _ in 0..100 {
+        let status = cli(&["status", service]);
+        if status.status.success() && String::from_utf8_lossy(&status.stdout).trim() == expected {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+#[test]
+fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
+    let service = service_name();
+    let _cleanup = ServiceCleanup(service.clone());
+    let ping =
+        std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()) + "\\System32\\PING.EXE";
+
+    let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let application = cli(&["get", &service, "Application"]);
+    assert!(application.status.success());
+    assert_eq!(String::from_utf8_lossy(&application.stdout).trim(), ping);
+
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(
+        wait_for_state(&service, "SERVICE_RUNNING"),
+        "service never reached SERVICE_RUNNING"
+    );
+    let status_code = cli(&["statuscode", &service]);
+    assert!(status_code.status.success());
+    assert_eq!(String::from_utf8_lossy(&status_code.stdout).trim(), "4");
+
+    let processes = cli(&["processes", &service]);
+    assert!(processes.status.success());
+    assert!(
+        String::from_utf8_lossy(&processes.stdout)
+            .to_ascii_uppercase()
+            .contains("PING.EXE"),
+        "process listing omitted the test child: {}",
+        String::from_utf8_lossy(&processes.stdout)
+    );
+
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(
+        wait_for_state(&service, "SERVICE_STOPPED"),
+        "service never reached SERVICE_STOPPED"
+    );
+
+    let removed = cli(&["remove", &service, "confirm"]);
+    assert!(
+        removed.status.success(),
+        "remove failed: {}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let mut disappeared = false;
+    for _ in 0..100 {
+        if !cli(&["status", &service]).status.success() {
+            disappeared = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(disappeared, "service remained queryable after removal");
+}
