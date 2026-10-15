@@ -538,7 +538,7 @@ fn runs_configured_start_and_exit_hooks() {
             .success()
     );
     for ((event_action, marker), path) in [
-        ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_START_REQUESTED_COUNT% %NSSM_START_COUNT% %NSSM_EXIT_COUNT% %NSSM_THROTTLE_COUNT% %NSSM_RUNTIME% %NSSM_LAST_CONTROL% %NSSM_SERVICE_DISPLAYNAME% %NSSM_COMMAND_LINE%"),
+        ("Start/Pre", "start-pre %NSSM_EVENT% %NSSM_ACTION% %NSSM_TRIGGER% %NSSM_DEADLINE% %NSSM_CONFIGURATION% %NSSM_START_REQUESTED_COUNT% %NSSM_START_COUNT% %NSSM_EXIT_COUNT% %NSSM_THROTTLE_COUNT% %NSSM_RUNTIME% %NSSM_LAST_CONTROL% %NSSM_SERVICE_DISPLAYNAME% %NSSM_COMMAND_LINE%"),
         ("Start/Post", "start-post %NSSM_START_REQUESTED_COUNT% %NSSM_START_COUNT%"),
         ("Exit/Post", "exit-post %NSSM_EXIT_COUNT% %NSSM_APPLICATION_RUNTIME%"),
     ]
@@ -580,6 +580,10 @@ fn runs_configured_start_and_exit_hooks() {
     assert_eq!(fields.next(), Some("Pre"));
     assert_eq!(fields.next(), Some("START"));
     assert_eq!(fields.next(), Some("20000"));
+    assert_eq!(fields.next(), Some("64-bit"));
+    if cfg!(debug_assertions) {
+        assert_eq!(fields.next(), Some("debug"));
+    }
     assert_eq!(fields.next(), Some("1"));
     assert_eq!(fields.next(), Some("0"));
     assert_eq!(fields.next(), Some("0"));

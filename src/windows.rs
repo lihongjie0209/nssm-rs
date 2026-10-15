@@ -2584,10 +2584,16 @@ fn invoke_hook(
     let image = std::env::current_exe().map_err(|error| error.to_string())?;
     let application = read_optional_reg_string(service, "Application")?.unwrap_or_default();
     let parameters = read_optional_reg_string(service, "AppParameters")?.unwrap_or_default();
-    let application_command_line = if parameters.is_empty() {
-        quote_windows_arg(&application)
+    let application_command_line = format!("\"{application}\" {parameters}");
+    let architecture = if cfg!(target_pointer_width = "64") {
+        "64-bit"
     } else {
-        format!("{} {parameters}", quote_windows_arg(&application))
+        "32-bit"
+    };
+    let configuration = if cfg!(debug_assertions) {
+        format!("{architecture} debug")
+    } else {
+        architecture.to_owned()
     };
     let trigger = match event {
         "Start" => control_name(0),
@@ -2628,7 +2634,7 @@ fn invoke_hook(
         .env("NSSM_EVENT", event)
         .env("NSSM_ACTION", action)
         .env("NSSM_TRIGGER", trigger)
-        .env("NSSM_CONFIGURATION", "64-bit")
+        .env("NSSM_CONFIGURATION", configuration)
         .env(
             "NSSM_BUILD_DATE",
             option_env!("NSSM_BUILD_DATE").unwrap_or(""),
