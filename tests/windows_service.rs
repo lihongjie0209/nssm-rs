@@ -165,7 +165,7 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
     );
 
     let exit_policy_before_start = cli(&["get", &service, "AppExit", "Default"]);
-    assert!(!exit_policy_before_start.status.success());
+    assert_eq!(exit_policy_before_start.status.code(), Some(5));
     assert!(exit_policy_before_start.stdout.is_empty());
 
     assert!(
@@ -181,6 +181,13 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         "nssm-r test service"
     );
     assert!(cli(&["reset", &service, "Description"]).status.success());
+
+    let invalid_start = cli(&["set", &service, "Start", "NOT_A_START_TYPE"]);
+    assert_eq!(invalid_start.status.code(), Some(6));
+    assert!(invalid_start.stdout.is_empty());
+    let unknown_setting = cli(&["get", &service, "NssmRUnknownSetting"]);
+    assert_eq!(unknown_setting.status.code(), Some(1));
+    assert!(unknown_setting.stdout.is_empty());
 
     assert!(
         cli(&["set", &service, "DisplayName", "NSSM Rust Test"])

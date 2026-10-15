@@ -1814,6 +1814,24 @@ fn service_is_missing(name: &str) -> bool {
     missing
 }
 
+fn known_setting(parameter: &str) -> bool {
+    managed_setting(parameter).is_some()
+        || [
+            "DependOnGroup",
+            "DependOnService",
+            "Description",
+            "DisplayName",
+            "Environment",
+            "ImagePath",
+            "Name",
+            "ObjectName",
+            "Start",
+            "Type",
+        ]
+        .iter()
+        .any(|name| parameter.eq_ignore_ascii_case(name))
+}
+
 fn state(service: SC_HANDLE) -> Result<u32, String> {
     let mut status = SERVICE_STATUS::default();
     if unsafe { QueryServiceStatus(service, &mut status) } == 0 {
@@ -3824,7 +3842,51 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 eprintln!("nssm-r: service '{service}' does not exist\r");
                 return Ok(3);
             }
-            execute_service_command(command).map(|()| 0)
+            match command {
+                Command::Get {
+                    service,
+                    parameter,
+                    extra,
+                } if known_setting(&parameter) => match get_setting(&service, &parameter, &extra) {
+                    Ok(()) => Ok(0),
+                    Err(error) => {
+                        eprintln!("nssm-r: {error}\r");
+                        Ok(5)
+                    }
+                },
+                Command::Set {
+                    service,
+                    parameter,
+                    values,
+                } if known_setting(&parameter) => {
+                    match set_setting(&service, &parameter, &values) {
+                        Ok(()) => Ok(0),
+                        Err(error) => {
+                            eprintln!("nssm-r: {error}\r");
+                            Ok(6)
+                        }
+                    }
+                }
+                Command::Reset {
+                    service,
+                    parameter,
+                    extra,
+                }
+                | Command::Unset {
+                    service,
+                    parameter,
+                    extra,
+                } if known_setting(&parameter) => {
+                    match reset_setting(&service, &parameter, &extra) {
+                        Ok(()) => Ok(0),
+                        Err(error) => {
+                            eprintln!("nssm-r: {error}\r");
+                            Ok(6)
+                        }
+                    }
+                }
+                command => execute_service_command(command).map(|()| 0),
+            }
         }
     }
 }
