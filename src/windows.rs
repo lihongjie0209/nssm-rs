@@ -2562,6 +2562,16 @@ fn control_name(control: u32) -> &'static str {
     }
 }
 
+fn hook_deadline_ms(event: &str, action: &str) -> u64 {
+    if (event.eq_ignore_ascii_case("Start") || event.eq_ignore_ascii_case("Stop"))
+        && action.eq_ignore_ascii_case("Pre")
+    {
+        20_000
+    } else {
+        60_000
+    }
+}
+
 fn invoke_hook(
     service: &str,
     event: &str,
@@ -2608,11 +2618,7 @@ fn invoke_hook(
         "Stop" | "Rotate" | "Power" => control_name(HOOK_LAST_CONTROL.load(Ordering::SeqCst)),
         _ => "",
     };
-    let deadline = if matches!((event, action), ("Start", "Pre") | ("Stop", "Pre")) {
-        "20000"
-    } else {
-        "60000"
-    };
+    let deadline_ms = hook_deadline_ms(event, action);
     let service_handle = open_service(service, SERVICE_QUERY_CONFIG)?;
     let (service_config_storage, service_config) = query_service_config(service_handle.0)?;
     let _keep_service_config_storage_alive = service_config_storage;
@@ -2685,7 +2691,7 @@ fn invoke_hook(
             exit_code.map_or_else(String::new, |code| code.to_string()),
         )
         .env("NSSM_COMMAND_LINE", application_command_line)
-        .env("NSSM_DEADLINE", deadline);
+        .env("NSSM_DEADLINE", deadline_ms.to_string());
     if read_reg_dword(service, "AppRedirectHook", 0)? != 0 {
         let stdout = open_stdio_file(service, "AppStdout", child_environment, false)?;
         let stderr = open_stdio_file(service, "AppStderr", child_environment, false)?;
@@ -2706,7 +2712,7 @@ fn invoke_hook(
         }
         return Ok(None);
     }
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_millis(deadline_ms);
     loop {
         if let Some(status) = hook.try_wait().map_err(|error| error.to_string())? {
             return Ok(status.code().map(|code| code as u32));
@@ -3468,5 +3474,20 @@ pub fn execute(command: Command) -> Result<(), String> {
         Command::List { all } => list_services(all),
         Command::Processes(names) => processes(&names),
         _ => Err(format!("command is not implemented yet: {command:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hook_deadline_ms;
+
+    #[test]
+    fn hook_deadlines_match_service_status_and_general_hook_limits() {
+        assert_eq!(hook_deadline_ms("Start", "Pre"), 20_000);
+        assert_eq!(hook_deadline_ms("Stop", "Pre"), 20_000);
+        assert_eq!(hook_deadline_ms("Rotate", "Pre"), 60_000);
+        assert_eq!(hook_deadline_ms("Start", "Post"), 60_000);
+        assert_eq!(hook_deadline_ms("Exit", "Post"), 60_000);
+        assert_eq!(hook_deadline_ms("start", "pre"), 20_000);
     }
 }
