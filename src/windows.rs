@@ -48,7 +48,7 @@ use windows_sys::Win32::{
     },
     UI::Shell::{IsUserAnAdmin, SHELLEXECUTEINFOW, ShellExecuteExW},
     UI::WindowsAndMessaging::{
-        ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, EnumWindows,
+        ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, EnumThreadWindows,
         GetWindowThreadProcessId, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PostMessageW,
         PostThreadMessageW, SW_SHOW, WM_CLOSE, WM_ENDSESSION, WM_QUIT,
     },
@@ -3690,9 +3690,28 @@ fn send_console_ctrl_c(process_id: u32) {
 }
 
 fn send_window_close(process_id: u32) {
-    unsafe {
-        EnumWindows(Some(post_close_to_process_window), process_id as LPARAM);
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return;
     }
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    while more {
+        if entry.th32OwnerProcessID == process_id {
+            unsafe {
+                EnumThreadWindows(
+                    entry.th32ThreadID,
+                    Some(post_close_to_process_window),
+                    process_id as LPARAM,
+                );
+            }
+        }
+        more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
 }
 
 fn send_thread_quit(process_id: u32) {
