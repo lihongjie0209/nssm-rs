@@ -915,6 +915,83 @@ fn start_pre_hook_exit_99_aborts_application_launch() {
 }
 
 #[test]
+fn rotates_and_stops_through_the_configured_hooks_in_order() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let ping = format!("{windows}\\System32\\PING.EXE");
+    let marker_path = std::env::temp_dir().join(format!("{service}_hook_order.txt"));
+    let marker_path = marker_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![marker_path.clone()]);
+    let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let online_rotation = cli(&["set", &service, "AppRotateOnline", "1"]);
+    assert!(
+        online_rotation.status.success(),
+        "online rotation set failed: {}",
+        String::from_utf8_lossy(&online_rotation.stderr)
+    );
+    for (event, action) in [
+        ("Rotate/Pre", "rotate-pre"),
+        ("Rotate/Post", "rotate-post"),
+        ("Stop/Pre", "stop-pre"),
+    ] {
+        let hook = format!("cmd.exe /c echo {action}>>\"{marker_path}\"");
+        let configured = cli(&["set", &service, "AppEvents", event, &hook]);
+        assert!(
+            configured.status.success(),
+            "{event} hook set failed: {}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+    }
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_RUNNING"));
+
+    let rotated = cli(&["rotate", &service]);
+    assert!(
+        rotated.status.success(),
+        "rotate failed: {}",
+        String::from_utf8_lossy(&rotated.stderr)
+    );
+    let mut rotation_hooks_ran = false;
+    for _ in 0..100 {
+        rotation_hooks_ran = std::fs::read_to_string(&marker_path).is_ok_and(|contents| {
+            contents.lines().collect::<Vec<_>>() == ["rotate-pre", "rotate-post"]
+        });
+        if rotation_hooks_ran {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        rotation_hooks_ran,
+        "rotation hook order was wrong: {:?}",
+        std::fs::read_to_string(&marker_path)
+    );
+
+    let stopped = cli(&["stop", &service]);
+    assert!(
+        stopped.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let hooks = std::fs::read_to_string(&marker_path).expect("hook marker exists");
+    assert_eq!(
+        hooks.lines().collect::<Vec<_>>(),
+        ["rotate-pre", "rotate-post", "stop-pre"]
+    );
+}
+
+#[test]
 fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
