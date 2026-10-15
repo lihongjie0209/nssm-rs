@@ -1195,7 +1195,14 @@ fn long_stop_wait_updates_status_and_logs_event_1078() {
     }
     assert!(std::path::Path::new(&started_marker).exists());
 
-    assert!(cli(&["stop", &service]).status.success());
+    let binary = std::env::var_os("NSSM_RS_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nssm-rs").into());
+    let stopping = Command::new(binary)
+        .args(["stop", &service])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("nssm-rs stop command starts");
     let progress_deadline = Instant::now() + Duration::from_secs(5);
     let mut checkpoint = 0;
     while Instant::now() < progress_deadline {
@@ -1209,6 +1216,12 @@ fn long_stop_wait_updates_status_and_logs_event_1078() {
         }
         thread::sleep(Duration::from_millis(100));
     }
+    let stopped = stopping.wait_with_output().expect("stop command exits");
+    assert!(
+        stopped.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
     assert!(checkpoint > 0, "long stop wait advances the SCM checkpoint");
     let stop_deadline = Instant::now() + Duration::from_secs(30);
     while !wait_for_service_state(&service, "SERVICE_STOPPED") && Instant::now() < stop_deadline {
