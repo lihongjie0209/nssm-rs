@@ -575,7 +575,10 @@ fn runs_configured_start_and_exit_hooks() {
     }
     assert!(
         hooks_ran,
-        "not all configured lifecycle hooks created their marker files"
+        "lifecycle hook output did not complete: start_pre={:?}, start_post={:?}, exit_post={:?}",
+        std::fs::read_to_string(&event_paths[0]),
+        std::fs::read_to_string(&event_paths[1]),
+        std::fs::read_to_string(&event_paths[2]),
     );
     let start_hook = std::fs::read_to_string(&event_paths[0]).unwrap();
     let mut fields = start_hook.split_whitespace();
