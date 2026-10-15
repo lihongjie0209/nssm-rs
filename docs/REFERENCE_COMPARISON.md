@@ -18,6 +18,7 @@ It is a partial report, not the command-by-command release acceptance report.
 
 | Scenario | Result |
 |---|---|
+| No arguments | The reference returns status 1. When started without an attached console, the pinned NSSM build attempts its GUI usage dialog; nssm-rs now keeps this CLI-only and writes usage to stderr with status 1. Explicit `help` remains a successful stdout command. |
 | `list all ignored` | Both exited 0 and returned the same 331 service names. This confirms the reference behavior of considering only the first optional argument. |
 | `list definitely-not-all` | Both exited 0. The host had no NSSM-managed services, so both returned no names. |
 | `list` and `list all` | Rechecked both commands against the pinned executable on 2026-10-15; output and exit status matched on this host. |

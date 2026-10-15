@@ -4,6 +4,13 @@ use std::process::ExitCode;
 const USAGE: &str = "nssm-rs: Windows service wrapper\n\nUsage: nssm-rs <command> [arguments]\n\nCommands: install, remove, start, stop, restart, pause, continue, status, statuscode, get, set, reset, unset, rotate, list, dump, processes, help, version\n";
 
 fn run(args: &[String]) -> Result<u8, String> {
+    if args.is_empty() {
+        #[cfg(windows)]
+        eprint!("{}", USAGE.replace('\n', "\r\n"));
+        #[cfg(not(windows))]
+        eprint!("{USAGE}");
+        return Ok(1);
+    }
     match parse_args(args).map_err(|e| e.to_string())? {
         Command::Help => {
             #[cfg(windows)]

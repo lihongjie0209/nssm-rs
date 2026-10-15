@@ -18,6 +18,14 @@ fn help_and_version_are_successful_commands_with_output() {
     assert!(!version.stdout.is_empty());
 }
 
+#[test]
+fn no_arguments_print_usage_to_stderr_and_return_usage_exit_status() {
+    let result = run(&[]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Usage: nssm-rs"));
+}
+
 #[cfg(not(windows))]
 #[test]
 fn service_operation_on_unsupported_host_fails_without_claiming_success() {
