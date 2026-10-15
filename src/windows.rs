@@ -2705,7 +2705,8 @@ fn process_tree(service: &str) -> Result<(), String> {
     let root_image = match process_image(root) {
         Ok(image) => image,
         Err(ProcessImageError::Open(error)) => {
-            cli_eprintln!("{service}: {root}: {error}");
+            let message = process_open_error_output(service, root, &error);
+            write_cli_output(&message, true);
             return Ok(());
         }
         Err(ProcessImageError::Times) => return Ok(()),
@@ -3246,6 +3247,13 @@ fn windows_error_message(error: &io::Error) -> String {
     String::from_utf16_lossy(&buffer[..length as usize])
         .trim_end_matches(['\r', '\n'])
         .to_owned()
+}
+
+fn process_open_error_output(service: &str, pid: u32, error: &io::Error) -> String {
+    format!(
+        "{service}: {pid}: {}\r\r\n\r\n",
+        windows_error_message(error)
+    )
 }
 
 fn open_hook_stdio_file(
@@ -5341,8 +5349,9 @@ mod tests {
         PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CONTROL_PAUSE,
         elevation_arguments, elevation_parameters, hook_abi_environment, hook_deadline_ms,
         hook_exit_code, hook_trigger, parse_u32, power_hook_action, power_hook_invocation,
-        priority_name, priority_value, process_belongs_to_service_lifetime, quote_dump_arg,
-        service_control_event, service_type_name, valid_hook,
+        priority_name, priority_value, process_belongs_to_service_lifetime,
+        process_open_error_output, quote_dump_arg, service_control_event, service_type_name,
+        valid_hook,
     };
 
     struct TestDirectory(std::path::PathBuf);
@@ -5456,6 +5465,15 @@ mod tests {
         assert!(process_belongs_to_service_lifetime(100, 200, 200));
         assert!(!process_belongs_to_service_lifetime(100, 200, 99));
         assert!(!process_belongs_to_service_lifetime(100, 200, 201));
+    }
+
+    #[test]
+    fn process_open_error_uses_windows_message_and_nssm_line_endings() {
+        let error = std::io::Error::from_raw_os_error(5);
+        let output = process_open_error_output("Spooler", 5280, &error);
+        assert!(output.starts_with("Spooler: 5280: "));
+        assert!(!output.contains("(os error 5)"));
+        assert!(output.ends_with("\r\r\n\r\n"));
     }
 
     #[test]

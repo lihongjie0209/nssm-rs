@@ -3,7 +3,8 @@ param(
     [string] $ReferenceBinary,
 
     [Parameter(Mandatory = $true)]
-    [string] $CandidateBinary
+    [string] $CandidateBinary,
+    [string] $OnlyCase
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +44,7 @@ $cases = @(
     @{ Name = 'case-insensitive GET'; Args = @('GET', 'Spooler', 'Start') },
     @{ Name = 'status Spooler'; Args = @('STATUS', 'Spooler') },
     @{ Name = 'statuscode Spooler'; Args = @('STATUSCODE', 'Spooler') },
+    @{ Name = 'processes Spooler'; Args = @('processes', 'Spooler') },
     @{ Name = 'status missing service'; Args = @('status', 'NssmRDefinitelyMissingService') },
     @{ Name = 'unknown setting on native service'; Args = @('get', 'Spooler', 'DefinitelyNotASetting') }
 )
@@ -65,6 +67,12 @@ $managedSettings = @(
 )
 foreach ($setting in $managedSettings) {
     $cases += @{ Name = "get Spooler $setting (native service)"; Args = @('get', 'Spooler', $setting) }
+}
+if ($OnlyCase) {
+    $cases = @($cases | Where-Object { $_.Name -eq $OnlyCase })
+    if ($cases.Count -eq 0) {
+        throw "Unknown case: $OnlyCase"
+    }
 }
 
 function Quote-WindowsArgument([string] $Argument) {
@@ -118,6 +126,8 @@ foreach ($case in $cases) {
         "  candidate stdout: $([Text.Encoding]::Default.GetString([Convert]::FromBase64String($candidate.Stdout)))"
         "  reference stderr: $([Text.Encoding]::Default.GetString([Convert]::FromBase64String($reference.Stderr)))"
         "  candidate stderr: $([Text.Encoding]::Default.GetString([Convert]::FromBase64String($candidate.Stderr)))"
+        "  reference stderr hex: $([BitConverter]::ToString([Convert]::FromBase64String($reference.Stderr)))"
+        "  candidate stderr hex: $([BitConverter]::ToString([Convert]::FromBase64String($candidate.Stderr)))"
     }
 }
 
