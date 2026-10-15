@@ -111,8 +111,11 @@ Start/Pre, Start/Post, Stop/Pre, Exit/Post, Rotate and Power hooks, and
 configuration dump are implemented. GitHub Actions now runs a dedicated
 Windows SCM smoke test that creates a real temporary service, verifies its
 configuration, starts it, checks the wrapped process and numeric state, stops
-it, removes it, and confirms it disappeared. Remaining acceptance scope includes
-exact live MoveFile versus CopyAndTruncate behavior, complete hook environment
-compatibility, broader event/error-path coverage, and command-by-command parity
-against the pinned reference. Do not call this a complete NSSM replacement or
-publish a stable release until each acceptance row has evidence.
+it, removes it, and confirms it disappeared. Live log rotation now closes and
+moves the active file when CopyAndTruncate is disabled, or copies and truncates
+the same active file when enabled; Windows integration tests check backup data,
+continued output and active-file identity for both modes. Remaining acceptance
+scope includes complete hook environment compatibility, broader event/error-path
+coverage, and command-by-command parity against the pinned reference. Do not
+call this a complete NSSM replacement or publish a stable release until each
+acceptance row has evidence.

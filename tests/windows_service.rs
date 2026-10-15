@@ -684,7 +684,16 @@ fn startup_rotation_preserves_existing_log_and_creates_a_fresh_active_file() {
 }
 
 #[test]
-fn rotate_command_copies_the_active_log_and_keeps_appending() {
+fn rotate_command_moves_the_active_log_and_reopens_it() {
+    verify_live_rotation(false);
+}
+
+#[test]
+fn rotate_command_copy_truncates_when_configured() {
+    verify_live_rotation(true);
+}
+
+fn verify_live_rotation(copy_and_truncate: bool) {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
     let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
@@ -712,6 +721,13 @@ fn rotate_command_copies_the_active_log_and_keeps_appending() {
             .status
             .success()
     );
+    if copy_and_truncate {
+        assert!(
+            cli(&["set", &service, "AppStdoutCopyAndTruncate", "1"])
+                .status
+                .success()
+        );
+    }
     assert!(cli(&["start", &service]).status.success());
     let mut has_output = false;
     for _ in 0..100 {
@@ -722,6 +738,10 @@ fn rotate_command_copies_the_active_log_and_keeps_appending() {
         thread::sleep(Duration::from_millis(100));
     }
     assert!(has_output, "child did not write its initial output");
+    let original_created = std::fs::metadata(&log_path)
+        .and_then(|metadata| metadata.created())
+        .expect("active log has a creation timestamp");
+    thread::sleep(Duration::from_millis(1100));
     let rotated = cli(&["rotate", &service]);
     assert!(
         rotated.status.success(),
@@ -763,6 +783,14 @@ fn rotate_command_copies_the_active_log_and_keeps_appending() {
     assert!(
         resumed,
         "application output did not resume after live rotation"
+    );
+    let current_created = std::fs::metadata(&log_path)
+        .and_then(|metadata| metadata.created())
+        .expect("active log remains present after rotation");
+    assert_eq!(
+        current_created == original_created,
+        copy_and_truncate,
+        "live rotation did not preserve the expected active file identity"
     );
     let stopped = cli(&["stop", &service]);
     assert!(

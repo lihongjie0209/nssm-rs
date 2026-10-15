@@ -2,7 +2,7 @@
 
 An independent Rust reimplementation of the command-line portion of NSSM, the Windows service wrapper. The project does not include a graphical installer.
 
-> **Status: early development.** Argument parsing, Windows SCM control, install/remove, registry-backed managed settings, service hosting, environment composition, exit actions, restart throttling, process-tree termination, service listing, process-tree reporting, native service metadata editing, service dependency configuration, standard stream redirection, per-line UTC log timestamps, staged console/window/thread shutdown, lifecycle/power hooks and configuration dump are implemented. Exact live rotation modes and complete hook environment compatibility remain in progress. Do not use this build as a complete NSSM replacement or install production services with it.
+> **Status: early development.** Argument parsing, Windows SCM control, install/remove, registry-backed managed settings, service hosting, environment composition, exit actions, restart throttling, process-tree termination, service listing, process-tree reporting, native service metadata editing, service dependency configuration, standard stream redirection, per-line UTC log timestamps, live move or copy-and-truncate rotation, staged console/window/thread shutdown, lifecycle/power hooks and configuration dump are implemented. Complete hook environment compatibility and command-by-command parity checks remain in progress. Do not use this build as a complete NSSM replacement or install production services with it.
 
 ## Build and run
 

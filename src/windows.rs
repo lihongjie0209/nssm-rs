@@ -14,7 +14,7 @@ use std::{
     process::{Child, Command as ProcessCommand, Stdio},
     ptr,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
     },
     thread,
@@ -49,6 +49,144 @@ static ASYNC_HOOKS: Mutex<Vec<Child>> = Mutex::new(Vec::new());
 struct ManagedChild {
     child: Child,
     job: isize,
+}
+
+struct LogDestination {
+    path: String,
+    sharing: u32,
+    disposition: u32,
+    attributes: u32,
+    file: Mutex<Option<File>>,
+}
+
+impl LogDestination {
+    fn new(service: &str, setting: &str, path: String, file: File) -> Result<Arc<Self>, String> {
+        let sharing = read_reg_dword(service, &format!("{setting}ShareMode"), 3)?;
+        let disposition = read_reg_dword(service, &format!("{setting}CreationDisposition"), 4)?;
+        let attributes = read_reg_dword(service, &format!("{setting}FlagsAndAttributes"), 128)?;
+        Ok(Arc::new(Self {
+            path,
+            sharing,
+            disposition,
+            attributes,
+            file: Mutex::new(Some(file)),
+        }))
+    }
+
+    fn write_all(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut file = self.file.lock().map_err(|_| io::ErrorKind::Other)?;
+        file.as_mut()
+            .ok_or(io::ErrorKind::BrokenPipe)?
+            .write_all(bytes)
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        let mut file = self.file.lock().map_err(|_| io::ErrorKind::Other)?;
+        file.as_mut().ok_or(io::ErrorKind::BrokenPipe)?.flush()
+    }
+
+    fn rotate(
+        &self,
+        minimum_age: Duration,
+        minimum_size: u64,
+        delay: Duration,
+        force: bool,
+        copy_and_truncate: bool,
+    ) -> Result<bool, String> {
+        let mut file_guard = self
+            .file
+            .lock()
+            .map_err(|_| "log destination lock poisoned".to_owned())?;
+        let metadata = match fs::metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+        };
+        let modified = metadata.modified().map_err(|error| error.to_string())?;
+        if !log_rotation_due(
+            metadata.len(),
+            modified.elapsed().unwrap_or_default(),
+            minimum_age,
+            minimum_size,
+            force,
+        ) {
+            return Ok(false);
+        }
+        let rotated = rotated_log_path(Path::new(&self.path), modified)
+            .ok_or_else(|| format!("could not create rotated name for {}", self.path))?;
+        file_guard
+            .as_mut()
+            .ok_or_else(|| "log destination is closed".to_owned())?
+            .flush()
+            .map_err(|error| error.to_string())?;
+
+        if copy_and_truncate {
+            fs::copy(&self.path, &rotated).map_err(|error| {
+                format!(
+                    "unable to copy {} to {}: {error}",
+                    self.path,
+                    rotated.display()
+                )
+            })?;
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            file_guard
+                .as_mut()
+                .expect("log file remains open while copy-truncating")
+                .set_len(0)
+                .map_err(|error| error.to_string())?;
+        } else {
+            drop(file_guard.take());
+            if let Err(error) = fs::rename(&self.path, &rotated) {
+                *file_guard = Some(self.reopen().map_err(|reopen| {
+                    format!(
+                        "unable to move {}: {error}; reopen failed: {reopen}",
+                        self.path
+                    )
+                })?);
+                return Err(format!("unable to move {}: {error}", self.path));
+            }
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            *file_guard = Some(self.reopen().map_err(|error| {
+                format!("unable to reopen {} after rotation: {error}", self.path)
+            })?);
+        }
+        Ok(true)
+    }
+
+    fn reopen(&self) -> io::Result<File> {
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .append(true)
+            .share_mode(self.sharing)
+            .attributes(self.attributes);
+        match self.disposition {
+            1 => {
+                options.create_new(true);
+            }
+            2 => {
+                options.create(true).truncate(true);
+            }
+            3 => {}
+            4 => {
+                options.create(true);
+            }
+            5 => {
+                options.truncate(true);
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid disposition",
+                ));
+            }
+        }
+        options.open(&self.path)
+    }
 }
 
 struct RegKey(HKEY);
@@ -2084,23 +2222,27 @@ fn utc_timestamp_prefix() -> String {
     )
 }
 
-fn timestamp_stream<R: Read, W: Write>(mut input: R, mut output: W) -> io::Result<()> {
+fn log_stream<R: Read>(
+    mut input: R,
+    destination: Arc<LogDestination>,
+    timestamp: bool,
+) -> io::Result<()> {
     let mut buffer = [0; 4096];
     let mut line_start = true;
     loop {
         let count = input.read(&mut buffer)?;
         if count == 0 {
-            return output.flush();
+            return destination.flush();
         }
         let mut chunk = Vec::with_capacity(count + count / 40 * 25);
         for byte in &buffer[..count] {
-            if line_start {
+            if timestamp && line_start {
                 chunk.extend_from_slice(utc_timestamp_prefix().as_bytes());
             }
             chunk.push(*byte);
             line_start = *byte == b'\n';
         }
-        output.write_all(&chunk)?;
+        destination.write_all(&chunk)?;
     }
 }
 
@@ -2691,9 +2833,41 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         if STOP_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
-        let timestamp_stdout = timestamp_log && stdout_path.is_some();
-        let timestamp_stderr = timestamp_log && stderr_path.is_some();
-        let redirected_stdout = if timestamp_stdout {
+        let stdout_destination = if (timestamp_log || rotate_online) && stdout_path.is_some() {
+            match (stdout_path.as_deref(), stdout_file.take()) {
+                (Some(path), Some(file)) => {
+                    match LogDestination::new(&service_name, "AppStdout", path.to_owned(), file) {
+                        Ok(destination) => Some(destination),
+                        Err(_) => {
+                            set_status(SERVICE_STOPPED, 2, 0);
+                            return;
+                        }
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let stderr_destination = if (timestamp_log || rotate_online) && stderr_path.is_some() {
+            match (stderr_path.as_deref(), stderr_file.take()) {
+                (Some(path), Some(file)) => {
+                    match LogDestination::new(&service_name, "AppStderr", path.to_owned(), file) {
+                        Ok(destination) => Some(destination),
+                        Err(_) => {
+                            set_status(SERVICE_STOPPED, 2, 0);
+                            return;
+                        }
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let timestamp_stdout = timestamp_log && stdout_destination.is_some();
+        let timestamp_stderr = timestamp_log && stderr_destination.is_some();
+        let redirected_stdout = if stdout_destination.is_some() {
             Stdio::piped()
         } else {
             stdout_file
@@ -2701,7 +2875,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 .map(Stdio::from)
                 .unwrap_or_else(Stdio::null)
         };
-        let redirected_stderr = if timestamp_stderr {
+        let redirected_stderr = if stderr_destination.is_some() {
             Stdio::piped()
         } else {
             stderr_file
@@ -2762,14 +2936,20 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             }
         };
         let mut logger_threads = Vec::new();
-        if timestamp_stdout {
-            if let (Some(pipe), Some(file)) = (process.stdout.take(), stdout_file.take()) {
-                logger_threads.push(thread::spawn(move || timestamp_stream(pipe, file)));
+        if let Some(destination) = stdout_destination.as_ref() {
+            if let Some(pipe) = process.stdout.take() {
+                let destination = destination.clone();
+                logger_threads.push(thread::spawn(move || {
+                    log_stream(pipe, destination, timestamp_stdout)
+                }));
             }
         }
-        if timestamp_stderr {
-            if let (Some(pipe), Some(file)) = (process.stderr.take(), stderr_file.take()) {
-                logger_threads.push(thread::spawn(move || timestamp_stream(pipe, file)));
+        if let Some(destination) = stderr_destination.as_ref() {
+            if let Some(pipe) = process.stderr.take() {
+                let destination = destination.clone();
+                logger_threads.push(thread::spawn(move || {
+                    log_stream(pipe, destination, timestamp_stderr)
+                }));
             }
         }
         let launched = match assign_to_kill_on_close_job(process, kill_process_tree) {
@@ -2887,11 +3067,27 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                     true,
                     false,
                 );
-                for (path, copy) in [
-                    (stdout_path.as_deref(), stdout_copy_and_truncate),
-                    (stderr_path.as_deref(), stderr_copy_and_truncate),
+                for (destination, path, copy) in [
+                    (
+                        stdout_destination.as_ref(),
+                        stdout_path.as_deref(),
+                        stdout_copy_and_truncate,
+                    ),
+                    (
+                        stderr_destination.as_ref(),
+                        stderr_path.as_deref(),
+                        stderr_copy_and_truncate,
+                    ),
                 ] {
-                    if let Some(path) = path {
+                    if let Some(destination) = destination {
+                        let _ = destination.rotate(
+                            Duration::from_secs(rotate_seconds as u64),
+                            rotate_size,
+                            rotate_delay,
+                            requested_rotation,
+                            copy,
+                        );
+                    } else if let Some(path) = path {
                         let _ = rotate_log_file(
                             path,
                             Duration::from_secs(rotate_seconds as u64),
@@ -2899,7 +3095,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                             rotate_delay,
                             requested_rotation,
                             copy,
-                            true,
+                            false,
                         );
                     }
                 }
