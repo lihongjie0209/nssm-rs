@@ -1009,9 +1009,11 @@ fn set_is_reset_to_default(parameter: &str, values: &[String]) -> bool {
             "description" | "displayname" | "environment" => values.is_empty(),
             "objectname" => {
                 values.is_empty()
-                    || values
-                        .first()
-                        .is_some_and(|value| value.eq_ignore_ascii_case("LocalSystem"))
+                    || values.first().is_some_and(|value| {
+                        ["LocalSystem", "System", "NT Authority\\System"]
+                            .iter()
+                            .any(|alias| value.eq_ignore_ascii_case(alias))
+                    })
             }
             _ => false,
         };
@@ -6368,6 +6370,13 @@ mod tests {
                 !set_is_reset_to_default(setting, &[String::new()]),
                 "an explicit empty value for {setting} must remain a set operation"
             );
+        }
+    }
+
+    #[test]
+    fn system_account_aliases_are_reported_as_reset_to_default() {
+        for alias in ["LocalSystem", "SYSTEM", "NT Authority\\System"] {
+            assert!(set_is_reset_to_default("ObjectName", &[alias.into()]));
         }
     }
 
