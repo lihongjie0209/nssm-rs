@@ -2634,6 +2634,10 @@ enum ProcessImageError {
 static FAIL_NEXT_PROCESS_SNAPSHOT: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static FAIL_NEXT_PROCESS_ENUMERATION: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_OPEN_PROCESS_PID: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+static FAIL_NEXT_PROCESS_TIMES: AtomicBool = AtomicBool::new(false);
 
 fn process_snapshot() -> io::Result<HANDLE> {
     #[cfg(test)]
@@ -2658,12 +2662,39 @@ fn first_process_entry(snapshot: HANDLE, entry: *mut PROCESSENTRY32W) -> i32 {
     unsafe { Process32FirstW(snapshot, entry) }
 }
 
+fn open_process(pid: u32) -> HANDLE {
+    #[cfg(test)]
+    if FAIL_OPEN_PROCESS_PID
+        .compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        unsafe { SetLastError(5) };
+        return std::ptr::null_mut();
+    }
+    unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) }
+}
+
+fn get_process_times(
+    process: HANDLE,
+    creation: &mut FILETIME,
+    exit: &mut FILETIME,
+    kernel: &mut FILETIME,
+    user: &mut FILETIME,
+) -> i32 {
+    #[cfg(test)]
+    if FAIL_NEXT_PROCESS_TIMES.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(5) };
+        return 0;
+    }
+    unsafe { GetProcessTimes(process, creation, exit, kernel, user) }
+}
+
 fn filetime_value(time: FILETIME) -> u64 {
     (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
 }
 
 fn process_image(pid: u32) -> Result<ProcessImage, ProcessImageError> {
-    let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
+    let process = open_process(pid);
     if process.is_null() {
         return Err(ProcessImageError::Open(io::Error::last_os_error()));
     }
@@ -2671,7 +2702,7 @@ fn process_image(pid: u32) -> Result<ProcessImage, ProcessImageError> {
     let mut exit = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
-    if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+    if get_process_times(process, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
         let error = io::Error::last_os_error();
         let error_message = windows_error_message(&error);
         report_event(
@@ -5382,18 +5413,56 @@ mod tests {
     use super::{
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
         EVENT_SERVICE_CONTROL_UNKNOWN, FAIL_NEXT_PROCESS_ENUMERATION, FAIL_NEXT_PROCESS_SNAPSHOT,
-        HOOK_LAST_APPLICATION_EXIT_CODE, HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE,
-        PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT,
-        SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT, elevation_arguments,
-        elevation_parameters, ensure_event_source, finish_async_hooks, hook_abi_environment,
-        hook_deadline_ms, hook_exit_code, hook_trigger, install, parse_u32, power_hook_action,
-        power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
-        process_open_error_output, process_tree_from_root, quote_dump_arg, remove,
-        service_control_event, service_handler, service_main, service_type_name, set_setting,
-        valid_hook, wide,
+        FAIL_NEXT_PROCESS_TIMES, FAIL_OPEN_PROCESS_PID, HOOK_LAST_APPLICATION_EXIT_CODE,
+        HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
+        PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTROL_PAUSE,
+        SERVICE_CONTROL_POWEREVENT, elevation_arguments, elevation_parameters, ensure_event_source,
+        finish_async_hooks, hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger,
+        install, parse_u32, power_hook_action, power_hook_invocation, priority_name,
+        priority_value, process_belongs_to_service_lifetime, process_open_error_output,
+        process_tree_from_root, quote_dump_arg, remove, service_control_event, service_handler,
+        service_main, service_type_name, set_setting, valid_hook, wide,
     };
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn powershell_path() -> String {
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+    }
+
+    fn latest_event_record(powershell: &str, event_id: u32) -> u64 {
+        let script = format!(
+            "$event = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id={event_id}}} -MaxEvents 1 -ErrorAction SilentlyContinue | Select-Object -First 1; if ($event) {{ [Console]::Write($event.RecordId) }} else {{ [Console]::Write('0') }}"
+        );
+        let output = std::process::Command::new(powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .expect("query the latest event record");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("PowerShell returns the prior event record number")
+    }
+
+    fn wait_for_event(powershell: &str, event_id: u32, after: u64, text: &str) {
+        let script = format!(
+            "$event = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id={event_id}}} -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object {{ $_.RecordId -gt {after} -and $_.Message.Contains('{text}') }} | Select-Object -First 1; if ($event) {{ exit 0 }}; exit 1"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if std::process::Command::new(powershell)
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        panic!("Application log contains event {event_id} mentioning {text}");
+    }
 
     struct TestDirectory(std::path::PathBuf);
 
@@ -5687,6 +5756,47 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         panic!("Application log contains event 1025 for injected enumeration failure");
+    }
+
+    #[test]
+    fn process_image_open_failure_reports_event_1026_for_a_descendant() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .expect("Windows event tests are serialized");
+        ensure_event_source().expect("test runner can register the NSSM event source");
+        let powershell = powershell_path();
+        let before = latest_event_record(&powershell, 1026);
+        let mut child = std::process::Command::new(&powershell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .spawn()
+            .expect("start a disposable descendant process");
+        FAIL_OPEN_PROCESS_PID.store(child.id(), Ordering::SeqCst);
+
+        let result = process_tree_from_root("NssmRsOpenProcessFailureTest", std::process::id());
+        let _ = child.kill();
+        let _ = child.wait();
+        result.expect("descendant OpenProcess failure is reported and traversal returns");
+        wait_for_event(&powershell, 1026, before, "NssmRsOpenProcessFailureTest");
+    }
+
+    #[test]
+    fn process_times_failure_reports_event_1044() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .expect("Windows event tests are serialized");
+        ensure_event_source().expect("test runner can register the NSSM event source");
+        let powershell = powershell_path();
+        let before = latest_event_record(&powershell, 1044);
+        FAIL_NEXT_PROCESS_TIMES.store(true, Ordering::SeqCst);
+
+        process_tree_from_root("NssmRsProcessTimesFailureTest", std::process::id())
+            .expect("GetProcessTimes failure is reported and traversal returns");
+        wait_for_event(&powershell, 1044, before, "");
     }
 
     #[test]
