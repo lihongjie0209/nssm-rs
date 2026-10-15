@@ -197,7 +197,7 @@ The service-main unit test invokes `RegisterServiceCtrlHandlerExW` outside an
 SCM dispatcher, producing the real Windows registration failure and verifying
 event 1005 in the Application log. The read-only Windows reference sweep now checks all 39 managed setting names
 against a native service and compares the exact stdout/stderr bytes and exit
-status. Across 74 safe invocations, it caught and resolved the extra carriage
+status. Across 75 safe invocations, it caught and resolved the extra carriage
 return NSSM emits for managed-setting rejection, the missing-subparameter
 precedence for `AppExit` and `AppEvents`, and the process-open error's system
 message and trailing blank line; Windows process/unit tests cover these cases.

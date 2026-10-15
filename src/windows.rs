@@ -1976,9 +1976,7 @@ fn dump_service(source: &str, target: Option<&str>) -> Result<(), (u8, String)> 
 fn dump_open_service_error(error: &str) -> String {
     if error.ends_with("(os error 5)") {
         let system_error = windows_error_message(&io::Error::from_raw_os_error(5));
-        format!(
-            "Can't open service!\r\r\nOpenService(): {system_error}\r\r\n\r\r\nAdministrator access is needed to edit a service.\r\r\n"
-        )
+        format!("Can't open service!\r\r\nOpenService(): {system_error}\r\r\n\r\r\n")
     } else {
         error.to_owned()
     }
@@ -5172,6 +5170,9 @@ fn elevate(arguments: &[String], command: &Command) -> u8 {
         Command::Remove { .. } => {
             cli_eprintln!("Administrator access is needed to remove a service.\r\r");
         }
+        Command::Dump { .. } => {
+            cli_eprintln!("Administrator access is needed to edit a service.\r\r");
+        }
         _ => {}
     }
     let executable = match std::env::current_exe() {
@@ -5670,9 +5671,7 @@ mod tests {
     fn dump_access_denied_matches_nssm_privilege_diagnostic() {
         let error = dump_open_service_error("Access is denied. (os error 5)");
         assert!(error.starts_with("Can't open service!\r\r\nOpenService(): "));
-        assert!(
-            error.ends_with("\r\r\n\r\r\nAdministrator access is needed to edit a service.\r\r\n")
-        );
+        assert!(error.ends_with("\r\r\n\r\r\n"));
         assert!(!error.contains("os error 5"));
         assert_eq!(
             dump_open_service_error("unexpected failure"),

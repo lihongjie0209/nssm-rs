@@ -50,6 +50,7 @@ $cases = @(
     @{ Name = 'statuscode Spooler'; Args = @('STATUSCODE', 'Spooler') },
     @{ Name = 'status Schedule'; Args = @('status', 'Schedule') },
     @{ Name = 'statuscode Schedule'; Args = @('statuscode', 'Schedule') },
+    @{ Name = 'dump Schedule with output name'; Args = @('dump', 'Schedule', 'NssmRsDumpCopy') },
     @{ Name = 'processes Spooler'; Args = @('processes', 'Spooler') },
     @{ Name = 'status missing service'; Args = @('status', 'NssmRDefinitelyMissingService') },
     @{ Name = 'unknown setting on native service'; Args = @('get', 'Spooler', 'DefinitelyNotASetting') }
