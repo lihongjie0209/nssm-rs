@@ -5,7 +5,7 @@ use nssm_rs::{
     quote_windows_arg, rotated_log_path, split_windows_args,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
@@ -70,7 +70,7 @@ static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROTATE_ENABLED: AtomicBool = AtomicBool::new(false);
 static CONTINUE_REQUESTED: AtomicBool = AtomicBool::new(false);
-static POWER_HOOK_REQUESTED: AtomicU32 = AtomicU32::new(0);
+static POWER_HOOK_REQUESTED: Mutex<VecDeque<PowerHookAction>> = Mutex::new(VecDeque::new());
 static HOOK_START_REQUESTED_COUNT: AtomicU32 = AtomicU32::new(0);
 static HOOK_START_COUNT: AtomicU32 = AtomicU32::new(0);
 static HOOK_EXIT_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -532,12 +532,26 @@ fn valid_hook(event: &str, action: &str) -> bool {
     }
 }
 
-fn power_hook_action(event_type: u32) -> Option<u32> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerHookAction {
+    Change,
+    Resume,
+}
+
+fn power_hook_action(event_type: u32) -> Option<PowerHookAction> {
     match event_type {
-        PBT_APMRESUMEAUTOMATIC => Some(2),   // Power/Resume
-        PBT_APMPOWERSTATUSCHANGE => Some(1), // Power/Change
+        PBT_APMRESUMEAUTOMATIC => Some(PowerHookAction::Resume),
+        PBT_APMPOWERSTATUSCHANGE => Some(PowerHookAction::Change),
         _ => None,
     }
+}
+
+fn queue_power_hook(queue: &mut VecDeque<PowerHookAction>, event_type: u32) -> bool {
+    let Some(action) = power_hook_action(event_type) else {
+        return false;
+    };
+    queue.push_back(action);
+    true
 }
 
 fn parse_u32(value: &str) -> Result<u32, String> {
@@ -3080,13 +3094,16 @@ unsafe extern "system" fn service_handler(
             ROTATE_REQUESTED.store(true, Ordering::SeqCst);
         }
         SERVICE_CONTROL_POWEREVENT => {
-            let Some(hook) = power_hook_action(event_type) else {
+            let queued = POWER_HOOK_REQUESTED
+                .lock()
+                .map(|mut pending| queue_power_hook(&mut pending, event_type))
+                .unwrap_or(false);
+            if !queued {
                 report_service_control(&wide_pointer(context.cast()), control, false);
                 return NO_ERROR;
-            };
+            }
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
             report_service_control(&wide_pointer(context.cast()), control, true);
-            POWER_HOOK_REQUESTED.store(hook, Ordering::SeqCst);
         }
         SERVICE_CONTROL_CONTINUE => {
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
@@ -3129,7 +3146,9 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     let service_name =
         String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name_ptr, len) });
     STOP_REQUESTED.store(false, Ordering::SeqCst);
-    POWER_HOOK_REQUESTED.store(0, Ordering::SeqCst);
+    if let Ok(mut pending) = POWER_HOOK_REQUESTED.lock() {
+        pending.clear();
+    }
     CONTINUE_REQUESTED.store(false, Ordering::SeqCst);
     HOOK_START_REQUESTED_COUNT.store(0, Ordering::SeqCst);
     HOOK_START_COUNT.store(0, Ordering::SeqCst);
@@ -3542,8 +3561,12 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             if STOP_REQUESTED.load(Ordering::SeqCst) {
                 break;
             }
-            match POWER_HOOK_REQUESTED.swap(0, Ordering::SeqCst) {
-                1 => {
+            let requested_power_hook = POWER_HOOK_REQUESTED
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.pop_front());
+            match requested_power_hook {
+                Some(PowerHookAction::Change) => {
                     let _ = invoke_hook(
                         &service_name,
                         "Power",
@@ -3558,7 +3581,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                         false,
                     );
                 }
-                2 => {
+                Some(PowerHookAction::Resume) => {
                     let _ = invoke_hook(
                         &service_name,
                         "Power",
@@ -4024,11 +4047,13 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::{
         EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
         EVENT_SERVICE_CONTROL_UNKNOWN, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        SERVICE_CONTROL_PAUSE, hook_deadline_ms, parse_u32, power_hook_action, priority_name,
-        priority_value, service_control_event, valid_hook,
+        PowerHookAction, SERVICE_CONTROL_PAUSE, hook_deadline_ms, parse_u32, power_hook_action,
+        priority_name, priority_value, queue_power_hook, service_control_event, valid_hook,
     };
 
     #[test]
@@ -4043,12 +4068,31 @@ mod tests {
 
     #[test]
     fn power_events_map_only_supported_windows_broadcasts_to_hooks() {
-        assert_eq!(power_hook_action(PBT_APMPOWERSTATUSCHANGE), Some(1));
-        assert_eq!(power_hook_action(PBT_APMRESUMEAUTOMATIC), Some(2));
+        assert_eq!(
+            power_hook_action(PBT_APMPOWERSTATUSCHANGE),
+            Some(PowerHookAction::Change)
+        );
+        assert_eq!(
+            power_hook_action(PBT_APMRESUMEAUTOMATIC),
+            Some(PowerHookAction::Resume)
+        );
         assert_eq!(power_hook_action(0), None);
         assert_eq!(power_hook_action(4), None);
         assert_eq!(power_hook_action(7), None);
         assert_eq!(power_hook_action(0xffff), None);
+    }
+
+    #[test]
+    fn queued_power_hooks_preserve_each_supported_event_in_arrival_order() {
+        let mut pending = VecDeque::new();
+        assert!(queue_power_hook(&mut pending, PBT_APMPOWERSTATUSCHANGE));
+        assert!(queue_power_hook(&mut pending, PBT_APMRESUMEAUTOMATIC));
+        assert!(!queue_power_hook(&mut pending, 7));
+        assert!(queue_power_hook(&mut pending, PBT_APMPOWERSTATUSCHANGE));
+        assert_eq!(pending.pop_front(), Some(PowerHookAction::Change));
+        assert_eq!(pending.pop_front(), Some(PowerHookAction::Resume));
+        assert_eq!(pending.pop_front(), Some(PowerHookAction::Change));
+        assert!(pending.is_empty());
     }
 
     #[test]

@@ -142,7 +142,10 @@ both the default append behavior and explicit `CREATE_ALWAYS` truncation while
 checking stdin, stdout and stderr contents. The Windows suite also verifies that SCM stop reaches responding children through
 CTRL+C, WM_CLOSE and WM_QUIT before termination fallback; hook tests capture all
 documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
-Rotate/Pre/Post and verify the configured working directory. A service launch
+Rotate/Pre/Post and verify the configured working directory. Power hook event
+mapping and FIFO preservation of consecutive Change/Resume notifications have
+Windows unit coverage; injecting real OS power broadcasts into a running service
+remains unverified. A service launch
 integration test also copies the child fixture under a Unicode executable path,
 passes Unicode arguments containing spaces, quotes, trailing backslashes, and an
 empty argument, then checks the child's exact received argument list. Another
@@ -150,7 +153,8 @@ service integration test queries the child process after launch and verifies
 that configured priority class and CPU affinity are effective at runtime. The
 SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
-acceptance scope includes hook ABI context parity for Power events, event-log compatibility
+acceptance scope includes system-level Power event delivery and hook ABI context
+parity, event-log compatibility
 beyond events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, 1020, 1034,
 1035, 1040, 1041, 1072 and 1077,
 broader error-path coverage, and command-by-command parity against the pinned
