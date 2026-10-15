@@ -2638,6 +2638,8 @@ static FAIL_NEXT_PROCESS_ENUMERATION: AtomicBool = AtomicBool::new(false);
 static FAIL_OPEN_PROCESS_PID: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static FAIL_NEXT_PROCESS_TIMES: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_STDIO_DUPLICATE: AtomicBool = AtomicBool::new(false);
 
 fn process_snapshot() -> io::Result<HANDLE> {
     #[cfg(test)]
@@ -3159,6 +3161,14 @@ enum StdioFileError {
         error: io::Error,
     },
     Seek,
+}
+
+fn duplicate_stdio_file(file: &File) -> io::Result<File> {
+    #[cfg(test)]
+    if FAIL_NEXT_STDIO_DUPLICATE.swap(false, Ordering::SeqCst) {
+        return Err(io::Error::from_raw_os_error(5));
+    }
+    file.try_clone()
 }
 
 impl From<String> for StdioFileError {
@@ -4444,7 +4454,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             };
         let mut stderr_file = if same_output_path {
             match stdout_file.as_ref() {
-                Some(file) => match file.try_clone() {
+                Some(file) => match duplicate_stdio_file(file) {
                     Ok(file) => Some(file),
                     Err(error) => {
                         let error = StdioFileError::Duplicate {
@@ -5413,14 +5423,15 @@ mod tests {
     use super::{
         Command, EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
         EVENT_SERVICE_CONTROL_UNKNOWN, FAIL_NEXT_PROCESS_ENUMERATION, FAIL_NEXT_PROCESS_SNAPSHOT,
-        FAIL_NEXT_PROCESS_TIMES, FAIL_OPEN_PROCESS_PID, HOOK_LAST_APPLICATION_EXIT_CODE,
-        HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTROL_PAUSE,
-        SERVICE_CONTROL_POWEREVENT, elevation_arguments, elevation_parameters, ensure_event_source,
-        finish_async_hooks, hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger,
-        install, parse_u32, power_hook_action, power_hook_invocation, priority_name,
-        priority_value, process_belongs_to_service_lifetime, process_open_error_output,
-        process_tree_from_root, quote_dump_arg, remove, service_control_event, service_handler,
+        FAIL_NEXT_PROCESS_TIMES, FAIL_NEXT_STDIO_DUPLICATE, FAIL_OPEN_PROCESS_PID,
+        HOOK_LAST_APPLICATION_EXIT_CODE, HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE,
+        PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation, SERVICE_CHILD_ENVIRONMENT,
+        SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT, StdioFileError, duplicate_stdio_file,
+        elevation_arguments, elevation_parameters, ensure_event_source, finish_async_hooks,
+        hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger, install, parse_u32,
+        power_hook_action, power_hook_invocation, priority_name, priority_value,
+        process_belongs_to_service_lifetime, process_open_error_output, process_tree_from_root,
+        quote_dump_arg, remove, report_stdio_setup_failure, service_control_event, service_handler,
         service_main, service_type_name, set_setting, valid_hook, wide,
     };
 
@@ -5797,6 +5808,31 @@ mod tests {
         process_tree_from_root("NssmRsProcessTimesFailureTest", std::process::id())
             .expect("GetProcessTimes failure is reported and traversal returns");
         wait_for_event(&powershell, 1044, before, "");
+    }
+
+    #[test]
+    fn duplicate_stdio_handle_failure_reports_event_1050() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .expect("Windows event tests are serialized");
+        ensure_event_source().expect("test runner can register the NSSM event source");
+        let powershell = powershell_path();
+        let before = latest_event_record(&powershell, 1050);
+        let directory = TestDirectory::new();
+        let file = std::fs::File::create(directory.0.join("shared-output.log"))
+            .expect("create a disposable output handle");
+        FAIL_NEXT_STDIO_DUPLICATE.store(true, Ordering::SeqCst);
+
+        let error = duplicate_stdio_file(&file).expect_err("injected handle duplication fails");
+        assert_eq!(error.raw_os_error(), Some(5));
+        let error = StdioFileError::Duplicate {
+            source: "stdout",
+            destination: "stderr",
+            error,
+        };
+        report_stdio_setup_failure("NssmRsDuplicateHandleFailureTest", "fixture.exe", &error);
+
+        wait_for_event(&powershell, 1050, before, "stdout");
     }
 
     #[test]

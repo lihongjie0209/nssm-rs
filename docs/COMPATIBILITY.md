@@ -179,9 +179,9 @@ service integration test queries the child process after launch and verifies
 that configured priority class and CPU affinity are effective at runtime. The
 SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
-acceptance scope includes system-level Power event delivery; Windows
-verification of event 1050; and event-log compatibility
-beyond events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1020, 1021, 1034,
+acceptance scope includes system-level Power event delivery and event-log
+compatibility beyond events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014,
+1015, 1016, 1020, 1021, 1034,
 1035, 1040, 1041, 1072 and 1077,
 broader error-path coverage, and command-by-command parity against the pinned
 reference. Missing-service exit status 3 is now covered for status, start, stop,
@@ -223,8 +223,8 @@ Application log event 1024 is written and its Windows error is returned. A
 second injection forces `Process32FirstW` to fail and verifies event 1025 in the
 Application log. A disposable descendant process with injected `OpenProcess`
 failure verifies event 1026; injected `GetProcessTimes` failure on the current
-process verifies event 1044. Failure injection for event 1050 remains
-unverified.
+process verifies event 1044. An injected handle-duplication failure exercises
+the shared error handler and verifies event 1050.
 
 Missing `AppParameters` now logs warning 1029 and uses an empty argument list.
 Missing or empty `AppDirectory` logs warning 1030 and falls back to the
