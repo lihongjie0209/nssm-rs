@@ -3250,7 +3250,7 @@ fn read_reg_dword(service: &str, value: &str, default: u32) -> Result<u32, Strin
 }
 
 fn read_stop_method_skip(service: &str) -> u32 {
-    let key = match open_service_registry(service, false, KEY_QUERY_VALUE) {
+    let key = match open_registry_key(service, "", false, KEY_QUERY_VALUE) {
         Ok(key) => key,
         Err(error) => {
             report_event(
