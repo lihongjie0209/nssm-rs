@@ -2362,6 +2362,52 @@ fn suicide_exit_action_terminates_the_service_host_as_a_failure() {
 }
 
 #[test]
+fn default_suicide_on_zero_exit_stops_gracefully_and_logs_the_nssm_diagnostic() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let installed = cli(&["install", &service, &command_prompt, "/c", "exit 0"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let configured = cli(&["set", &service, "AppExit", "Default", "Suicide"]);
+    assert!(
+        configured.status.success(),
+        "default Suicide action set failed: {}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(
+        wait_for_service_state(&service, "SERVICE_STOPPED"),
+        "default Suicide for exit code zero did not stop the service cleanly"
+    );
+
+    let graceful_suicide = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1021}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 6 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq '{command_prompt}' -and $event.Properties[2].Value -eq 'Suicide' -and $event.Properties[3].Value -eq 'Suicide' -and $event.Properties[4].Value -eq 'Suicide' -and $event.Properties[5].Value -eq 'Exit' -and $event.Message.Contains('exited with exit code 0')) {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&graceful_suicide),
+        "Application log contains event 1021 with NSSM's default Suicide fallback values"
+    );
+    let exit_action = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1016}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 3 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq 0 -and $event.Properties[2].Value -eq 'Suicide') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&exit_action),
+        "Application log preserves Suicide as the exit action before graceful fallback"
+    );
+}
+
+#[test]
 fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());

@@ -57,6 +57,7 @@ const EVENT_EXIT_RESTART: u32 = 0x4000_03f6;
 const EVENT_EXIT_IGNORE: u32 = 0x4000_03f7;
 const EVENT_EXIT: u32 = 0x4000_03f8;
 const EVENT_EXIT_UNCLEAN: u32 = 0x4000_03fc;
+const EVENT_GRACEFUL_SUICIDE: u32 = 0x4000_03fd;
 const EVENT_RESET_THROTTLE: u32 = 0x4000_040b;
 const EVENT_THROTTLED: u32 = 0x8000_040a;
 const EVENT_RESTART_DELAY: u32 = 0x4000_0430;
@@ -3767,6 +3768,8 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 return;
             }
         };
+        let graceful_default_suicide =
+            child_exit_code == 0 && inherited_default && action == ExitAction::Suicide;
         let action = normalize_exit_action(child_exit_code, action, inherited_default);
         let exit_code = child_exit_code.to_string();
         match action {
@@ -3782,11 +3785,28 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 break;
             }
             ExitAction::Exit => {
+                let logged_action = if graceful_default_suicide {
+                    "Suicide"
+                } else {
+                    "Exit"
+                };
                 report_event(
                     windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
                     EVENT_EXIT,
-                    &[&service_name, &exit_code, "Exit"],
+                    &[&service_name, &exit_code, logged_action],
                 );
+                if graceful_default_suicide {
+                    report_event(
+                        windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                        EVENT_GRACEFUL_SUICIDE,
+                        &[&service_name, &app, "Suicide", "Suicide", "Suicide", "Exit"],
+                    );
+                    report_event(
+                        windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                        EVENT_PROCESS_ALREADY_STOPPED,
+                        &[&service_name, &app],
+                    );
+                }
                 finish_async_hooks();
                 set_status(SERVICE_STOPPED, child_exit_code, 0);
                 return;
