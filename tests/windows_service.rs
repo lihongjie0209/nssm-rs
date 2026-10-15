@@ -2045,6 +2045,12 @@ fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
             .success(),
         "fixture service installs"
     );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success(),
+        "fixture exits after the test child completes"
+    );
 
     let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
     let write_invalid_priority = format!(
