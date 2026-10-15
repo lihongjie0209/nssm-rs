@@ -1685,7 +1685,13 @@ fn reset_native_setting(service: &str, parameter: &str, extra: &[String]) -> Res
             let _handle = open_service(service, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG)?;
             Ok(())
         }
-        "imagepath" | "start" | "type" | "name" => Err(format!("{parameter} has no reset value")),
+        "imagepath" | "start" | "type" | "name" => {
+            let parameter = canonical_setting_name(parameter);
+            let service = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());
+            Err(format!(
+                "Parameter \"{parameter}\" has no meaningful default value! Error setting parameter \"{parameter}\" for service \"{service}\"!"
+            ))
+        }
         _ => {
             let _ = extra;
             Err(format!("unsupported setting: {parameter}"))
@@ -6239,7 +6245,11 @@ pub fn execute(command: Command) -> Result<u8, String> {
             } if known_setting(&parameter) => match reset_setting(&service, &parameter, &extra) {
                 Ok(()) => Ok(0),
                 Err(error) => {
-                    cli_eprintln!("nssm-rs: {error}\r");
+                    if error.contains("has no meaningful default value!") {
+                        cli_eprintln!("{error}\r");
+                    } else {
+                        cli_eprintln!("nssm-rs: {error}\r");
+                    }
                     Ok(6)
                 }
             },
