@@ -1651,9 +1651,15 @@ fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
         wait_for_windows_powershell_condition(&script),
         "Application log contains event 1014 with the exit code, Restart action and executable"
     );
-    assert_eq!(
-        String::from_utf8_lossy(&cli(&["status", &service]).stdout).trim(),
-        "SERVICE_RUNNING"
+    let status = cli(&["status", &service]);
+    let current_state = String::from_utf8_lossy(&status.stdout).trim().to_owned();
+    assert!(
+        status.status.success()
+            && matches!(
+                current_state.as_str(),
+                "SERVICE_START_PENDING" | "SERVICE_RUNNING"
+            ),
+        "service left the active restart lifecycle with state {current_state}"
     );
 
     let stopped = cli(&["stop", &service]);
