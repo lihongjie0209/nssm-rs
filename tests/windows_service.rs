@@ -2037,12 +2037,15 @@ fn applies_configured_priority_and_cpu_affinity_to_child_process() {
 fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
-    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    let capture_path = std::env::temp_dir().join(format!("{service}_priority.txt"));
+    let capture_path = capture_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![capture_path.clone()]);
+    let fixture = std::env::var_os("NSSM_RS_TEST_FIXTURE")
+        .or_else(|| option_env!("CARGO_BIN_EXE_console-signal-fixture").map(Into::into))
+        .expect("process information fixture is built");
+    let fixture = fixture.to_string_lossy().into_owned();
     assert!(
-        cli(&["install", &service, &command_prompt, "/c", "exit 0"])
-            .status
-            .success(),
+        cli(&["install", &service, &fixture]).status.success(),
         "fixture service installs"
     );
     assert!(
@@ -2051,11 +2054,22 @@ fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
             .success(),
         "fixture exits after the test child completes"
     );
+    let parameters = format!(
+        "capture-process-info {}",
+        nssm_rs::quote_windows_arg(&capture_path)
+    );
+    assert!(
+        cli(&["set", &service, "AppParameters", &parameters])
+            .status
+            .success(),
+        "fixture captures the effective process priority"
+    );
 
     let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
     let write_invalid_priority = format!(
         "New-ItemProperty -LiteralPath '{registry_key}' -Name AppPriority -PropertyType DWord -Value 65536 -Force"
     );
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
     let written = Command::new(&powershell)
         .args([
@@ -2075,6 +2089,13 @@ fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
         String::from_utf8_lossy(&started.stderr)
     );
     assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+    let captured = std::fs::read_to_string(&capture_path)
+        .expect("child process reports its effective priority");
+    assert_eq!(
+        captured.lines().next(),
+        Some("32"),
+        "invalid AppPriority starts the child at NORMAL_PRIORITY_CLASS"
+    );
 
     let escaped_service = service.replace('\'', "''");
     let event = format!(
