@@ -62,14 +62,29 @@ fn cli(args: &[&str]) -> Output {
         .expect("nssm-rs executable starts")
 }
 
-fn windows_c_locale_bytes(value: &str) -> Vec<u8> {
-    use windows_sys::Win32::Globalization::WideCharToMultiByte;
+fn windows_cli_bytes(value: &str) -> Vec<u8> {
+    use windows_sys::Win32::{
+        Globalization::WideCharToMultiByte,
+        System::{Console::GetConsoleWindow, Threading::GetCurrentProcessId},
+        UI::WindowsAndMessaging::GetWindowThreadProcessId,
+    };
+
+    let console = unsafe { GetConsoleWindow() };
+    let mut console_process = 0;
+    let utf8 = !console.is_null()
+        && unsafe { GetWindowThreadProcessId(console, &mut console_process) } != 0
+        && unsafe { GetCurrentProcessId() != console_process };
+    let (code_page, flags) = if utf8 {
+        (65001, 0)
+    } else {
+        (1252, 0x0000_0400)
+    };
 
     let wide: Vec<u16> = value.encode_utf16().collect();
     let required = unsafe {
         WideCharToMultiByte(
-            1252,
-            0x0000_0400,
+            code_page,
+            flags,
             wide.as_ptr(),
             wide.len() as i32,
             std::ptr::null_mut(),
@@ -82,8 +97,8 @@ fn windows_c_locale_bytes(value: &str) -> Vec<u8> {
     let mut bytes = vec![0; required as usize];
     let written = unsafe {
         WideCharToMultiByte(
-            1252,
-            0x0000_0400,
+            code_page,
+            flags,
             wide.as_ptr(),
             wide.len() as i32,
             bytes.as_mut_ptr(),
@@ -794,7 +809,7 @@ fn string_settings_round_trip_unicode_spaces_and_reset_values() {
         );
         assert_eq!(
             cli_stdout_value(&queried),
-            windows_c_locale_bytes(&value),
+            windows_cli_bytes(&value),
             "{setting} did not preserve its string value in CLI output"
         );
 
@@ -812,7 +827,7 @@ fn string_settings_round_trip_unicode_spaces_and_reset_values() {
         );
         assert_eq!(
             cli_stdout_value(&queried),
-            windows_c_locale_bytes(expected_default),
+            windows_cli_bytes(expected_default),
             "reset {setting} did not restore its default"
         );
         if setting == "Application" {

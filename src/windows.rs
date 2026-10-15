@@ -28,7 +28,8 @@ use windows_sys::Win32::{
     Globalization::WideCharToMultiByte,
     System::Console::{
         AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleMode,
-        GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCtrlHandler, WriteConsoleW,
+        GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCtrlHandler,
+        SetConsoleOutputCP, WriteConsoleW,
     },
     System::{
         Diagnostics::ToolHelp::*,
@@ -76,8 +77,28 @@ const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
 // NSSM's MSVC CRT uses the default "C" locale for redirected wide output.
 const NSSM_C_LOCALE_CODE_PAGE: u32 = 1252;
 const WC_NO_BEST_FIT_CHARS: u32 = 0x0000_0400;
+const CP_UTF8: u32 = 65001;
+
+fn launched_from_existing_console() -> bool {
+    let console = unsafe { GetConsoleWindow() };
+    if console.is_null() {
+        return false;
+    }
+    let mut console_process = 0;
+    if unsafe { GetWindowThreadProcessId(console, &mut console_process) } == 0 {
+        return false;
+    }
+    unsafe { GetCurrentProcessId() != console_process }
+}
+
 fn write_cli_output(text: &str, is_error: bool) {
     let wide: Vec<u16> = text.encode_utf16().collect();
+    let utf8_console_mode = launched_from_existing_console();
+    if utf8_console_mode {
+        unsafe {
+            SetConsoleOutputCP(CP_UTF8);
+        }
+    }
     let handle = unsafe {
         GetStdHandle(if is_error {
             STD_ERROR_HANDLE
@@ -102,10 +123,16 @@ fn write_cli_output(text: &str, is_error: bool) {
         }
     }
 
+    let (code_page, conversion_flags) = if utf8_console_mode {
+        (CP_UTF8, 0)
+    } else {
+        (NSSM_C_LOCALE_CODE_PAGE, WC_NO_BEST_FIT_CHARS)
+    };
+
     let required = unsafe {
         WideCharToMultiByte(
-            NSSM_C_LOCALE_CODE_PAGE,
-            WC_NO_BEST_FIT_CHARS,
+            code_page,
+            conversion_flags,
             wide.as_ptr(),
             wide.len() as i32,
             ptr::null_mut(),
@@ -120,8 +147,8 @@ fn write_cli_output(text: &str, is_error: bool) {
     let mut bytes = vec![0; required as usize];
     let written = unsafe {
         WideCharToMultiByte(
-            NSSM_C_LOCALE_CODE_PAGE,
-            WC_NO_BEST_FIT_CHARS,
+            code_page,
+            conversion_flags,
             wide.as_ptr(),
             wide.len() as i32,
             bytes.as_mut_ptr(),
@@ -1784,11 +1811,7 @@ fn dump_native_settings(executable: &str, source: &str, target: &str) -> Result<
         }
     };
     dump_set_line(executable, target, "Start", None, startup);
-    let service_type = match config.dwServiceType {
-        SERVICE_WIN32_OWN_PROCESS => "SERVICE_WIN32_OWN_PROCESS",
-        value if value == (SERVICE_WIN32_OWN_PROCESS | 0x100) => "SERVICE_INTERACTIVE_PROCESS",
-        value => return Err(format!("unsupported service type: {value}")),
-    };
+    let service_type = service_type_name(config.dwServiceType);
     dump_set_line(executable, target, "Type", None, service_type);
 
     let dependencies = unsafe { dependency_list(config.lpDependencies) };
@@ -1835,11 +1858,14 @@ fn dump_native_settings(executable: &str, source: &str, target: &str) -> Result<
     Ok(())
 }
 
-fn dump_service(source: &str, target: Option<&str>) -> Result<(), String> {
-    let application = read_optional_reg_string(source, "Application")?
-        .ok_or_else(|| format!("service {source} is not managed by nssm-rs"))?;
+fn dump_service(source: &str, target: Option<&str>) -> Result<(), (u8, String)> {
+    let _service = open_service(source, SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG)
+        .map_err(|error| (3, error))?;
+    let application = read_optional_reg_string(source, "Application")
+        .map_err(|error| (4, error))?
+        .unwrap_or_default();
     let target = target.unwrap_or(source);
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let executable = std::env::current_exe().map_err(|error| (6, error.to_string()))?;
     let executable = executable.to_string_lossy();
     let install = vec![
         quote_dump_arg(&executable),
@@ -1848,8 +1874,10 @@ fn dump_service(source: &str, target: Option<&str>) -> Result<(), String> {
         quote_dump_arg(&application),
     ];
     cli_println!("{}\r", install.join(" "));
-    dump_managed_settings(&executable, source, target)?;
-    dump_native_settings(&executable, source, target)
+    if !application.is_empty() {
+        dump_managed_settings(&executable, source, target).map_err(|error| (1, error))?;
+    }
+    dump_native_settings(&executable, source, target).map_err(|error| (1, error))
 }
 impl Drop for ManagedChild {
     fn drop(&mut self) {
@@ -4343,6 +4371,13 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 }
             }
         }
+        Command::Dump { service, new_name } => match dump_service(&service, new_name.as_deref()) {
+            Ok(()) => Ok(0),
+            Err((code, error)) => {
+                cli_eprintln!("nssm-rs: {error}");
+                Ok(code)
+            }
+        },
         command => match command {
             Command::Get {
                 service,
@@ -4431,7 +4466,7 @@ fn execute_service_command(command: Command) -> Result<(), String> {
             parameter,
             extra,
         } => reset_setting(&service, &parameter, &extra),
-        Command::Dump { service, new_name } => dump_service(&service, new_name.as_deref()),
+        Command::Dump { .. } => unreachable!("dump commands are handled with NSSM exit codes"),
         Command::List { all } => list_services(all),
         Command::Processes(names) => processes(&names),
         _ => Err(format!("command is not implemented yet: {command:?}")),
