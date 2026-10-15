@@ -563,7 +563,11 @@ fn runs_configured_start_and_exit_hooks() {
     for _ in 0..100 {
         hooks_ran = event_paths
             .iter()
-            .all(|path| std::path::Path::new(path).is_file());
+            .all(|path| std::path::Path::new(path).is_file())
+            && std::fs::read_to_string(&event_paths[1])
+                .is_ok_and(|contents| contents.trim() == "start-post 1 1")
+            && std::fs::read_to_string(&event_paths[2])
+                .is_ok_and(|contents| contents.trim().starts_with("exit-post 1 "));
         if hooks_ran {
             break;
         }
