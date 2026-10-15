@@ -2,6 +2,15 @@ name: Reference compatibility
 
 on:
   workflow_dispatch:
+    inputs:
+      scenario:
+        description: Compatibility scenario to run
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - failed-restart
 
 permissions:
   contents: read
@@ -34,6 +43,7 @@ jobs:
           "NSSM_REFERENCE_BINARY=$destination/nssm.exe" >> $env:GITHUB_ENV
 
       - name: Compare safe read-only CLI commands
+        if: inputs.scenario == 'all'
         shell: pwsh
         run: >-
           pwsh -NoProfile -NonInteractive -File tests/reference_readonly_sweep.ps1
@@ -41,8 +51,18 @@ jobs:
           -CandidateBinary "target/debug/nssm-rs.exe"
 
       - name: Compare disposable service lifecycle
+        if: inputs.scenario == 'all'
         shell: pwsh
         run: >-
           pwsh -NoProfile -NonInteractive -File tests/reference_service_lifecycle.ps1
           -ReferenceBinary "$env:NSSM_REFERENCE_BINARY"
           -CandidateBinary "target/debug/nssm-rs.exe"
+
+      - name: Compare failed restart launch only
+        if: inputs.scenario == 'failed-restart'
+        shell: pwsh
+        run: >-
+          pwsh -NoProfile -NonInteractive -File tests/reference_service_lifecycle.ps1
+          -ReferenceBinary "$env:NSSM_REFERENCE_BINARY"
+          -CandidateBinary "target/debug/nssm-rs.exe"
+          -OnlyFailureRestart

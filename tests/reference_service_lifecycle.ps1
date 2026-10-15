@@ -3,7 +3,9 @@ param(
     [string] $ReferenceBinary,
 
     [Parameter(Mandatory = $true)]
-    [string] $CandidateBinary
+    [string] $CandidateBinary,
+
+    [switch] $OnlyFailureRestart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -451,6 +453,32 @@ $service = "NssmRsParity$PID$stamp"
 $application = Join-Path $env:WINDIR 'System32\PING.EXE'
 $referenceResults = @()
 $candidateResults = @()
+
+if ($OnlyFailureRestart) {
+    $failureService = "${service}Fail"
+    $referenceFailureResults = Run-FailedRestartScenario $ReferenceBinary $failureService
+    $candidateFailureResults = Run-FailedRestartScenario $CandidateBinary $failureService
+    if ($referenceFailureResults.Count -ne $candidateFailureResults.Count) {
+        throw "Failure restart result count differs: reference=$($referenceFailureResults.Count), candidate=$($candidateFailureResults.Count)"
+    }
+    for ($index = 0; $index -lt $referenceFailureResults.Count; $index++) {
+        $reference = $referenceFailureResults[$index]
+        $candidate = $candidateFailureResults[$index]
+        if ($reference.Label -ne $candidate.Label -or
+            $reference.ExitCode -ne $candidate.ExitCode -or
+            $reference.Stdout -cne $candidate.Stdout -or
+            $reference.Stderr -cne $candidate.Stderr) {
+            $referenceStdout = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($reference.Stdout))
+            $candidateStdout = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($candidate.Stdout))
+            $referenceStderr = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($reference.Stderr))
+            $candidateStderr = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($candidate.Stderr))
+            throw "Failure restart mismatch at $($reference.Label): reference exit=$($reference.ExitCode), candidate exit=$($candidate.ExitCode); reference stdout=[$referenceStdout] candidate stdout=[$candidateStdout] reference stderr=[$referenceStderr] candidate stderr=[$candidateStderr]"
+        }
+        Write-Host "$($reference.Label): match (exit $($reference.ExitCode))"
+    }
+    Write-Host "Matched $($referenceFailureResults.Count) failed-restart operations against the pinned NSSM reference."
+    return
+}
 
 try {
     $referenceResults = Run-Scenario $ReferenceBinary $service $application
