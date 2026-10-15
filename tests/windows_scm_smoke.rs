@@ -74,8 +74,8 @@ fn service_status_snapshot(
 fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
     let service = service_name();
     let _cleanup = ServiceCleanup(service.clone());
-    let ping =
-        std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into()) + "\\System32\\PING.EXE";
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let ping = format!("{windows}\\System32\\PING.EXE");
 
     let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
     assert!(
@@ -104,6 +104,25 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
         reset_description.stdout,
         format!("Reset parameter \"Description\" for service \"{service}\" to its default.\r\r\n")
             .as_bytes()
+    );
+
+    let set_empty_directory = cli(&["set", &service, "AppDirectory", ""]);
+    assert!(set_empty_directory.status.success());
+    assert_eq!(
+        set_empty_directory.stdout,
+        format!("Set parameter \"AppDirectory\" for service \"{service}\".\r\r\n").as_bytes()
+    );
+    let empty_directory = cli(&["get", &service, "AppDirectory"]);
+    assert!(empty_directory.status.success());
+    assert!(
+        String::from_utf8_lossy(&empty_directory.stdout)
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        cli(&["set", &service, "AppDirectory", &windows])
+            .status
+            .success()
     );
 
     let started = cli(&["start", &service]);

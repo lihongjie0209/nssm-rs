@@ -1028,7 +1028,7 @@ fn set_is_reset_to_default(parameter: &str, values: &[String]) -> bool {
             }),
         SettingKind::String => setting
             .default
-            .is_some_and(|default| values.join(" ") == default),
+            .is_some_and(|default| !default.is_empty() && values.join(" ") == default),
         SettingKind::MultiString => values.is_empty(),
         SettingKind::Hook => values.get(1..).is_none_or(|command| command.is_empty()),
         SettingKind::ExitAction => false,
@@ -6336,11 +6336,27 @@ mod tests {
         power_hook_action, power_hook_invocation, priority_name, priority_value,
         process_belongs_to_service_lifetime, process_open_error_output, process_tree_from_root,
         quote_dump_arg, remove, report_stdio_setup_failure, service_control_event, service_handler,
-        service_main, service_type_name, set_setting, status_controls_accepted, valid_hook,
-        valid_priority_class, wide,
+        service_main, service_type_name, set_is_reset_to_default, set_setting,
+        status_controls_accepted, valid_hook, valid_priority_class, wide,
     };
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn explicitly_set_empty_string_is_not_reported_as_reset() {
+        for setting in [
+            "AppParameters",
+            "AppDirectory",
+            "AppStdin",
+            "AppStdout",
+            "AppStderr",
+        ] {
+            assert!(
+                !set_is_reset_to_default(setting, &[String::new()]),
+                "an explicit empty value for {setting} must remain a set operation"
+            );
+        }
+    }
 
     #[test]
     fn service_control_acceptance_matches_nssm_startup_phases() {
