@@ -1014,7 +1014,11 @@ fn print_set_setting_error(service: &str, parameter: &str) {
 
 fn print_set_setting_failure(service: &str, parameter: &str, values: &[String]) {
     let value = values.join(" ");
-    if parameter.eq_ignore_ascii_case("AppAffinity") && normalize_cpu_affinity(&value).is_err() {
+    if parameter.eq_ignore_ascii_case("Name") {
+        cli_eprintln!("Services cannot be renamed!\r\r");
+    } else if parameter.eq_ignore_ascii_case("AppAffinity")
+        && normalize_cpu_affinity(&value).is_err()
+    {
         let (mut process_mask, mut system_mask) = (0usize, 0usize);
         let maximum_cpu = if unsafe {
             GetProcessAffinityMask(GetCurrentProcess(), &mut process_mask, &mut system_mask)
