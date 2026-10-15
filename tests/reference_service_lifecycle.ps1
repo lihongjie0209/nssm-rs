@@ -396,9 +396,9 @@ function Run-FailedRestartScenario([string] $Binary, [string] $Service) {
                 LogName = 'Application'
                 ProviderName = 'nssm'
                 Id = 1007
-                StartTime = $startedAt
             } -MaxEvents 100 -ErrorAction SilentlyContinue |
                 Where-Object {
+                    $_.TimeCreated -ge $startedAt -and
                     $_.Properties.Count -ge 2 -and
                     [string]$_.Properties[0].Value -eq $application -and
                     [string]$_.Properties[1].Value -eq $Service
@@ -409,7 +409,13 @@ function Run-FailedRestartScenario([string] $Binary, [string] $Service) {
             }
         }
         if (-not $event) {
-            throw "NSSM did not log event 1007 for failed restart of $Service"
+            $lastStatus = Invoke-Cli $Binary @('status', $Service)
+            $lastExitAction = Invoke-Cli $Binary @('get', $Service, 'AppExit', '23')
+            $lastStatusText = [Text.Encoding]::Default.GetString(
+                [Convert]::FromBase64String($lastStatus.Stdout)).Trim()
+            $lastExitActionText = [Text.Encoding]::Default.GetString(
+                [Convert]::FromBase64String($lastExitAction.Stdout)).Trim()
+            throw "NSSM did not log event 1007 for failed restart of $Service; state=$lastStatusText exit-action=$lastExitActionText"
         }
         $eventValues = @($event.Properties | ForEach-Object { [string]$_.Value })
         $eventRecord = "$($event.Id)`n$($eventValues -join "`n")"
