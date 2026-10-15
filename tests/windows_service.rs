@@ -1360,6 +1360,12 @@ fn stopping_service_terminates_descendant_processes() {
         "install failed: {}",
         String::from_utf8_lossy(&installed.stderr)
     );
+    let skip_graceful_methods = cli(&["set", &service, "AppStopMethodSkip", "7"]);
+    assert!(
+        skip_graceful_methods.status.success(),
+        "stop method configuration failed: {}",
+        String::from_utf8_lossy(&skip_graceful_methods.stderr)
+    );
     let started = cli(&["start", &service]);
     assert!(
         started.status.success(),
@@ -1369,6 +1375,7 @@ fn stopping_service_terminates_descendant_processes() {
     assert!(wait_for_service_state(&service, "SERVICE_RUNNING"));
 
     let mut process_handles = Vec::new();
+    let mut descendant_pids = Vec::new();
     let mut last_tree = String::new();
     for _ in 0..100 {
         let tree = cli(&["processes", &service]);
@@ -1384,6 +1391,7 @@ fn stopping_service_terminates_descendant_processes() {
             .filter_map(|line| line.split_whitespace().next()?.parse::<u32>().ok())
             .collect::<Vec<_>>();
         if pids.len() >= 2 {
+            descendant_pids = pids.clone();
             process_handles = pids
                 .into_iter()
                 .filter_map(|pid| {
@@ -1417,6 +1425,18 @@ fn stopping_service_terminates_descendant_processes() {
         );
         unsafe { CloseHandle(handle) };
     }
+    let pid_list = descendant_pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let event_script = format!(
+        "$ids = @({pid_list}); $events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1023,1027)}} -MaxEvents 300 -ErrorAction SilentlyContinue; $killing = @($events | Where-Object {{ $_.Id -eq 1023 -and $_.Properties.Count -ge 3 -and $_.Properties[0].Value -eq '{service}' -and $ids -contains [uint32]$_.Properties[1].Value -and $_.Properties[2].Value -eq '0' }}); $tree = @($events | Where-Object {{ $_.Id -eq 1027 -and $_.Properties.Count -ge 3 -and $ids -contains [uint32]$_.Properties[0].Value -and $_.Properties[2].Value -eq '{service}' }}); if ($killing.Count -ge 2 -and $tree.Count -ge 2) {{ exit 0 }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event_script),
+        "Application log contains process-tree events 1023 and 1027 for both descendants"
+    );
 }
 
 #[test]

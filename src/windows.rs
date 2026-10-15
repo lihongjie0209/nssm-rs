@@ -36,7 +36,8 @@ use windows_sys::Win32::{
     System::{
         Diagnostics::{Debug::FormatMessageW, ToolHelp::*},
         EventLog::{
-            DeregisterEventSource, EVENTLOG_ERROR_TYPE, RegisterEventSourceW, ReportEventW,
+            DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
+            RegisterEventSourceW, ReportEventW,
         },
         JobObjects::*,
         Registry::*,
@@ -83,6 +84,7 @@ const EVENT_GET_HOOK_FAILED: u32 = 0xc000_0439;
 const EVENT_NO_FLAGS: u32 = 0x8000_0405;
 const EVENT_NO_DIRECTORY: u32 = 0x8000_0406;
 const EVENT_DIRECTORY_FAILED: u32 = 0xc000_0407;
+const EVENT_KILLING: u32 = 0x4000_03ff;
 const EVENT_GET_PARAMETERS_FAILED: u32 = 0xc000_03ec;
 const EVENT_REGISTER_HANDLER_FAILED: u32 = 0xc000_03ed;
 const EVENT_PROCESS_SNAPSHOT_FAILED: u32 = 0xc000_0400;
@@ -93,6 +95,7 @@ const EVENT_ROTATE_FILE_FAILED: u32 = 0xc000_0427;
 const EVENT_SERVICE_CONTROL_HANDLED: u32 = 0x4000_0410;
 const EVENT_SERVICE_CONTROL_NOT_HANDLED: u32 = 0x4000_0411;
 const EVENT_SERVICE_CONTROL_UNKNOWN: u32 = 0x4000_0412;
+const EVENT_KILL_PROCESS_TREE: u32 = 0x4000_0403;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
@@ -3556,12 +3559,115 @@ fn wait_process_for(child: &mut Child, grace: Duration) -> bool {
     }
 }
 
+fn report_process_tree_termination(service: &str, root: u32, exit_code: u32) {
+    let snapshot = match process_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let message = windows_error_message(&error);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_PROCESS_SNAPSHOT_FAILED,
+                &[service, &message],
+            );
+            return;
+        }
+    };
+
+    let mut children = HashMap::<u32, Vec<u32>>::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut ok = first_process_entry(snapshot, &mut entry);
+    if ok == 0 {
+        let error = io::Error::last_os_error();
+        let message = windows_error_message(&error);
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_PROCESS_ENUMERATE_FAILED,
+            &[service, &message],
+        );
+    }
+    while ok != 0 {
+        children
+            .entry(entry.th32ParentProcessID)
+            .or_default()
+            .push(entry.th32ProcessID);
+        ok = unsafe { Process32NextW(snapshot, &mut entry) };
+        if ok == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+                let message = windows_error_message(&error);
+                report_event(
+                    EVENTLOG_ERROR_TYPE,
+                    EVENT_PROCESS_ENUMERATE_FAILED,
+                    &[service, &message],
+                );
+            }
+        }
+    }
+    unsafe { CloseHandle(snapshot) };
+
+    fn visit(
+        service: &str,
+        pid: u32,
+        parent: u32,
+        exit_code: u32,
+        children: &HashMap<u32, Vec<u32>>,
+        seen: &mut HashSet<u32>,
+    ) {
+        if !seen.insert(pid) {
+            return;
+        }
+        let pid_text = pid.to_string();
+        let exit_text = exit_code.to_string();
+        report_event(
+            EVENTLOG_INFORMATION_TYPE,
+            EVENT_KILLING,
+            &[service, &pid_text, &exit_text],
+        );
+        let process = open_process(pid);
+        if process.is_null() {
+            let error = io::Error::last_os_error();
+            let message = windows_error_message(&error);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_OPEN_PROCESS_FAILED,
+                &[&pid_text, service, &message],
+            );
+        } else {
+            let parent_text = parent.to_string();
+            report_event(
+                EVENTLOG_INFORMATION_TYPE,
+                EVENT_KILL_PROCESS_TREE,
+                &[&pid_text, &parent_text, service],
+            );
+            unsafe { CloseHandle(process) };
+        }
+        if let Some(descendants) = children.get(&pid) {
+            for descendant in descendants {
+                visit(service, *descendant, pid, exit_code, children, seen);
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    visit(
+        service,
+        root,
+        std::process::id(),
+        exit_code,
+        &children,
+        &mut seen,
+    );
+}
+
 fn stop_child(
     service: &str,
     application: &str,
     child: &mut ManagedChild,
     no_console: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     report_event(
         windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
         EVENT_TERMINATEPROCESS,
@@ -3569,6 +3675,7 @@ fn stop_child(
     );
     let skip = read_reg_dword(service, "AppStopMethodSkip", 0)?;
     let pid = child.child.id();
+    let mut tree_events_logged = false;
     for method in nssm_rs::stop_methods(skip, no_console) {
         match method {
             StopMethod::Console | StopMethod::Window | StopMethod::Threads => {
@@ -3581,12 +3688,18 @@ fn stop_child(
                 signal(pid);
                 let delay = read_reg_dword(service, setting, 1500)?;
                 if wait_process_for(&mut child.child, Duration::from_millis(delay as u64)) {
-                    return Ok(());
+                    return Ok(tree_events_logged);
                 }
             }
             StopMethod::Terminate => {
                 if child.job != 0 {
-                    unsafe { TerminateJobObject(child.job as HANDLE, 0) };
+                    report_process_tree_termination(service, pid, 0);
+                    tree_events_logged = true;
+                    if unsafe { TerminateJobObject(child.job as HANDLE, 0) } == 0 {
+                        unsafe {
+                            TerminateProcess(child.child.as_raw_handle() as HANDLE, 0);
+                        }
+                    }
                 } else {
                     unsafe { TerminateProcess(child.child.as_raw_handle() as HANDLE, 0) };
                 }
@@ -3601,7 +3714,7 @@ fn stop_child(
     {
         thread::sleep(Duration::from_millis(100));
     }
-    Ok(())
+    Ok(tree_events_logged)
 }
 
 fn read_exit_rule(service: &str, exit_code: Option<u32>) -> Result<Option<ExitAction>, String> {
@@ -4939,14 +5052,19 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             && let Some(mut proc) = child.take()
         {
             let stop_requested = STOP_REQUESTED.load(Ordering::SeqCst);
+            let mut tree_events_logged = false;
             if stop_requested {
                 stop_process_handled = true;
-                let _ = stop_child(&service_name, &app, &mut proc, no_console);
+                tree_events_logged =
+                    stop_child(&service_name, &app, &mut proc, no_console).unwrap_or(false);
             }
             if let Ok(status) = proc.child.wait()
                 && STOP_REQUESTED.load(Ordering::SeqCst)
             {
                 child_exit_code = status.code().unwrap_or(1) as u32;
+            }
+            if proc.job != 0 && !tree_events_logged {
+                report_process_tree_termination(&service_name, proc.child.id(), child_exit_code);
             }
         }
         if logger_threads
