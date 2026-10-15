@@ -16,7 +16,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
-      - run: cargo test --all-targets
+      - name: Run Windows unit and CLI tests
+        run: cargo test --lib --bins --test cli_compat --test cli_process
+      - name: Run complete Windows service integration suite
+        run: cargo test --test windows_scm_smoke --test windows_service -- --nocapture --test-threads=1
       - run: cargo build --release
       - name: Package Windows x64 release
         shell: pwsh
