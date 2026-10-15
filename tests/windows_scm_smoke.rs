@@ -107,8 +107,8 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
     );
     assert_eq!(
         service_status.dwServiceType,
-        windows_sys::Win32::System::Services::SERVICE_WIN32_OWN_PROCESS | 0x100,
-        "service status type matches NSSM"
+        windows_sys::Win32::System::Services::SERVICE_WIN32_OWN_PROCESS,
+        "SCM reports the configured own-process service type"
     );
     let status_code = cli(&["statuscode", &service]);
     assert_eq!(status_code.status.code(), Some(4));
