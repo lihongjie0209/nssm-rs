@@ -636,6 +636,89 @@ fn all_dword_settings_round_trip_and_reset_to_nssm_defaults() {
 }
 
 #[test]
+fn string_settings_round_trip_unicode_spaces_and_reset_values() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let ping = format!("{windows}\\System32\\PING.EXE");
+    let installed = cli(&["install", &service, &ping, "-t", "127.0.0.1"]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let temporary = std::env::temp_dir();
+    let settings = [
+        ("Application", format!("{windows}\\System32\\cmd.exe"), ""),
+        ("AppParameters", "--label \"two words\"".to_owned(), ""),
+        (
+            "AppDirectory",
+            "C:\\Program Files\\服务 测试".to_owned(),
+            "",
+        ),
+        (
+            "AppStdin",
+            temporary
+                .join(format!("{service} standard input.txt"))
+                .to_string_lossy()
+                .into_owned(),
+            "",
+        ),
+        (
+            "AppStdout",
+            temporary
+                .join(format!("{service} standard output.txt"))
+                .to_string_lossy()
+                .into_owned(),
+            "",
+        ),
+        (
+            "AppStderr",
+            temporary
+                .join(format!("{service} standard error.txt"))
+                .to_string_lossy()
+                .into_owned(),
+            "",
+        ),
+    ];
+
+    for (setting, value, expected_default) in settings {
+        let configured = cli(&["set", &service, setting, &value]);
+        assert!(
+            configured.status.success(),
+            "set {setting} failed: {}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+        let queried = cli(&["get", &service, setting]);
+        assert!(
+            queried.status.success(),
+            "get {setting} failed: {}",
+            String::from_utf8_lossy(&queried.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&queried.stdout).trim(),
+            value,
+            "{setting} did not preserve its string value"
+        );
+
+        let reset = cli(&["reset", &service, setting]);
+        assert!(
+            reset.status.success(),
+            "reset {setting} failed: {}",
+            String::from_utf8_lossy(&reset.stderr)
+        );
+        let queried = cli(&["get", &service, setting]);
+        assert!(queried.status.success(), "get reset {setting} failed");
+        assert_eq!(
+            String::from_utf8_lossy(&queried.stdout).trim(),
+            expected_default,
+            "reset {setting} did not restore its default"
+        );
+    }
+}
+
+#[test]
 fn missing_service_commands_return_nssm_service_lookup_status() {
     let service = unique_service_name();
     for arguments in [
