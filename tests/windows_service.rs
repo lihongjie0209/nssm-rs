@@ -526,6 +526,38 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
 }
 
 #[test]
+fn missing_service_commands_return_nssm_service_lookup_status() {
+    let service = unique_service_name();
+    for arguments in [
+        vec!["status", service.as_str()],
+        vec!["start", service.as_str()],
+        vec!["stop", service.as_str()],
+        vec!["restart", service.as_str()],
+        vec!["pause", service.as_str()],
+        vec!["continue", service.as_str()],
+        vec!["rotate", service.as_str()],
+        vec!["get", service.as_str(), "Description"],
+        vec!["set", service.as_str(), "Description", "value"],
+        vec!["reset", service.as_str(), "Description"],
+        vec!["remove", service.as_str(), "confirm"],
+    ] {
+        let result = cli(&arguments);
+        assert_eq!(
+            result.status.code(),
+            Some(3),
+            "{} should return NSSM's missing-service status; stderr={}",
+            arguments[0],
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stdout.is_empty(),
+            "{} unexpectedly wrote stdout",
+            arguments[0]
+        );
+    }
+}
+
+#[test]
 fn sends_ctrl_c_to_child_in_its_console_before_termination_fallback() {
     verify_service_shutdown_signal(&[], "6", "ctrl-c");
 }

@@ -1795,6 +1795,25 @@ fn open_service(name: &str, access: u32) -> Result<ScHandle, String> {
     }
 }
 
+fn service_is_missing(name: &str) -> bool {
+    let manager = unsafe { OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        return false;
+    }
+    let name = wide(OsStr::new(name));
+    let service = unsafe { OpenServiceW(manager, name.as_ptr(), SERVICE_QUERY_STATUS) };
+    if !service.is_null() {
+        unsafe {
+            CloseServiceHandle(service);
+            CloseServiceHandle(manager);
+        }
+        return false;
+    }
+    let missing = io::Error::last_os_error().raw_os_error() == Some(1060);
+    unsafe { CloseServiceHandle(manager) };
+    missing
+}
+
 fn state(service: SC_HANDLE) -> Result<u32, String> {
     let mut status = SERVICE_STATUS::default();
     if unsafe { QueryServiceStatus(service, &mut status) } == 0 {
@@ -3779,7 +3798,34 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 }
             }
         }
-        command => execute_service_command(command).map(|()| 0),
+        command => {
+            let service = match &command {
+                Command::Start(service)
+                | Command::Stop(service)
+                | Command::Restart(service)
+                | Command::Pause(service)
+                | Command::Continue(service)
+                | Command::Status(service)
+                | Command::Rotate(service)
+                | Command::Get { service, .. }
+                | Command::Set { service, .. }
+                | Command::Reset { service, .. }
+                | Command::Unset { service, .. }
+                | Command::Remove { service, .. }
+                | Command::Dump { service, .. } => Some(service.as_str()),
+                Command::Processes(services) => services.first().map(String::as_str),
+                Command::Install { .. }
+                | Command::List { .. }
+                | Command::StatusCode(_)
+                | Command::Help
+                | Command::Version => None,
+            };
+            if let Some(service) = service.filter(|service| service_is_missing(service)) {
+                eprintln!("nssm-r: service '{service}' does not exist\r");
+                return Ok(3);
+            }
+            execute_service_command(command).map(|()| 0)
+        }
     }
 }
 

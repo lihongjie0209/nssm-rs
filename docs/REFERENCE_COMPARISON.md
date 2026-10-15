@@ -30,6 +30,7 @@ It is a partial report, not the command-by-command release acceptance report.
 | `get <new-service> AppExit Default` before first start / after first start | Both fail before the first start because the `AppExit` key does not yet exist, then return `Restart` after startup initializes the default rule. NSSM emits an uninitialized control character when the key exists but has no default value; nssm-r keeps a deterministic `Restart` fallback for this malformed state. |
 | `get Spooler Description` | Both binaries emitted the same UTF-8 Chinese text when captured as raw bytes. The reference used CRLF and nssm-r initially used LF. Windows CLI output now uses CRLF; a Windows lifecycle integration assertion checks the raw bytes. |
 | `statuscode` for a missing service | Both exited 0, matching NSSM's documented failure sentinel. Diagnostic wording differs. |
+| Missing-service lookup for `status`, `start`, `stop`, `restart`, `pause`, `continue`, `rotate`, `get`, `set`, `reset`, and confirmed `remove` | Directly compared on the local Windows host: NSSM returns exit code 3 for each. nssm-r now returns 3 and emits no stdout; a Windows integration test exercises the same command set. |
 | `version` | Both commands succeed, but each reports its own binary identity and build metadata. |
 
 ## Remaining comparison work
