@@ -61,7 +61,7 @@ fn no_arguments_print_usage_to_stderr_and_return_usage_exit_status() {
 #[cfg(windows)]
 #[test]
 fn missing_exit_or_hook_subparameters_precede_missing_service_lookup() {
-    for command in ["get", "set", "reset", "unset"] {
+    for command in ["get", "reset", "unset"] {
         for setting in ["AppExit", "AppEvents"] {
             let result = run(&[command, "NssmRDefinitelyMissingService", setting]);
             assert_eq!(result.status.code(), Some(1), "{command} {setting}");
@@ -69,6 +69,29 @@ fn missing_exit_or_hook_subparameters_precede_missing_service_lookup() {
             let expected = format!("Parameter \"{setting}\" requires a subparameter!\r\r\n");
             assert_eq!(result.stderr, expected.as_bytes(), "{command} {setting}");
         }
+    }
+
+    for (setting, subparameter) in [("AppExit", "23"), ("AppEvents", "Start/Pre")] {
+        let result = run(&[
+            "set",
+            "NssmRDefinitelyMissingService",
+            setting,
+            subparameter,
+        ]);
+        assert_eq!(result.status.code(), Some(1), "set {setting}");
+        assert!(result.stdout.is_empty(), "set {setting}");
+        let expected = format!("Parameter \"{setting}\" requires a subparameter!\r\r\n");
+        assert_eq!(result.stderr, expected.as_bytes(), "set {setting}");
+    }
+
+    for setting in ["AppExit", "AppEvents"] {
+        let result = run(&["set", "NssmRDefinitelyMissingService", setting]);
+        assert_eq!(result.status.code(), Some(1), "set {setting}");
+        assert!(result.stdout.is_empty(), "set {setting}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("Usage: nssm-rs"),
+            "set {setting} prints CLI usage"
+        );
     }
 }
 

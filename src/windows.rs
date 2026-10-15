@@ -5911,6 +5911,19 @@ pub fn execute(command: Command) -> Result<u8, String> {
         print_invalid_parameter(parameter);
         return Ok(1);
     }
+    if matches!(
+        &command,
+        Command::Set {
+            parameter,
+            values,
+            ..
+        } if (parameter.eq_ignore_ascii_case("AppExit")
+            || parameter.eq_ignore_ascii_case("AppEvents"))
+            && values.is_empty()
+    ) {
+        write_cli_output(&super::USAGE.replace('\n', "\r\n"), true);
+        return Ok(1);
+    }
     let missing_subparameter = match &command {
         Command::Get {
             parameter, extra, ..
@@ -5930,7 +5943,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
             parameter, values, ..
         } if (parameter.eq_ignore_ascii_case("AppExit")
             || parameter.eq_ignore_ascii_case("AppEvents"))
-            && values.is_empty() =>
+            && values.len() == 1 =>
         {
             Some(parameter.as_str())
         }

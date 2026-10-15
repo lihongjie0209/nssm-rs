@@ -65,14 +65,26 @@ $cases = @(
     @{ Name = 'unknown setting on native service'; Args = @('get', 'Spooler', 'DefinitelyNotASetting') }
 )
 
-# NSSM validates required subparameters before opening SCM services. These
-# recognized commands emit ordinary diagnostics and cannot enter usage().
-foreach ($command in @('get', 'set', 'reset', 'unset')) {
+# NSSM validates these required subparameters before opening SCM services.
+# Bare set commands are excluded because NSSM routes them to usage(), which
+# may open a GUI dialog when there is no console.
+foreach ($command in @('get', 'reset', 'unset')) {
     foreach ($setting in @('AppExit', 'AppEvents')) {
         $cases += @{
             Name = "$command missing $setting subparameter"
             Args = @($command, 'NssmRDefinitelyMissingService', $setting)
         }
+    }
+}
+foreach ($settingAndSubparameter in @(
+    @{ Setting = 'AppExit'; Subparameter = '23' },
+    @{ Setting = 'AppEvents'; Subparameter = 'Start/Pre' }
+)) {
+    $setting = $settingAndSubparameter.Setting
+    $subparameter = $settingAndSubparameter.Subparameter
+    $cases += @{
+        Name = "set missing $setting action or command"
+        Args = @('set', 'NssmRDefinitelyMissingService', $setting, $subparameter)
     }
 }
 
@@ -135,8 +147,14 @@ function Invoke-ReadOnlyCase([string] $Binary, [string[]] $Arguments) {
     $stdoutPath = [IO.Path]::GetTempFileName()
     $stderrPath = [IO.Path]::GetTempFileName()
     $argumentLine = ($Arguments | ForEach-Object { Quote-WindowsArgument $_ }) -join ' '
-    $process = Start-Process -FilePath $Binary -ArgumentList $argumentLine -NoNewWindow -Wait -PassThru `
+    $process = Start-Process -FilePath $Binary -ArgumentList $argumentLine -NoNewWindow -PassThru `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    if (-not $process.WaitForExit(15000)) {
+        $process.Kill($true)
+        $process.WaitForExit()
+        Remove-Item $stdoutPath, $stderrPath -Force
+        throw "Timed out after 15 seconds: $Binary $argumentLine"
+    }
     $stdout = [Convert]::ToBase64String([IO.File]::ReadAllBytes($stdoutPath))
     $stderr = [Convert]::ToBase64String([IO.File]::ReadAllBytes($stderrPath))
     Remove-Item $stdoutPath, $stderrPath
