@@ -1300,6 +1300,9 @@ fn passes_replacement_and_expanded_extra_environment_to_child() {
             .status
             .success()
     );
+    let base = cli(&["get", &service, "AppEnvironment", "NSSMR_BASE"]);
+    assert!(base.status.success());
+    assert_eq!(String::from_utf8_lossy(&base.stdout).trim(), "base");
     assert!(
         cli(&[
             "set",
@@ -1309,6 +1312,12 @@ fn passes_replacement_and_expanded_extra_environment_to_child() {
         ])
         .status
         .success()
+    );
+    let derived = cli(&["get", &service, "AppEnvironmentExtra", "NSSMR_DERIVED"]);
+    assert!(derived.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&derived.stdout).trim(),
+        "%NSSMR_BASE%-extra"
     );
     assert!(
         cli(&["set", &service, "AppStdout", &stdout_path])
@@ -1343,6 +1352,24 @@ fn passes_replacement_and_expanded_extra_environment_to_child() {
         "child did not receive the composed environment: {:?}",
         std::fs::read_to_string(&stdout_path)
     );
+    for (setting, key) in [
+        ("AppEnvironment", "NSSMR_BASE"),
+        ("AppEnvironmentExtra", "NSSMR_DERIVED"),
+    ] {
+        let reset = cli(&["reset", &service, setting]);
+        assert!(
+            reset.status.success(),
+            "reset {setting} failed: {}",
+            String::from_utf8_lossy(&reset.stderr)
+        );
+        let queried = cli(&["get", &service, setting, key]);
+        assert!(queried.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&queried.stdout).trim(),
+            "",
+            "reset {setting} retained {key}"
+        );
+    }
 }
 
 #[test]

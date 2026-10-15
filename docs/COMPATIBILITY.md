@@ -126,7 +126,10 @@ round-trips and resets all 28 managed DWORD settings against the real service
 registry, including priority name normalization and each setting's default.
 Another Windows integration test round-trips and resets Application,
 AppParameters, AppDirectory, AppStdin, AppStdout and AppStderr, including a
-Unicode directory and paths containing spaces.
+Unicode directory and paths containing spaces. The environment integration
+scenario also queries the raw AppEnvironment/AppEnvironmentExtra values, checks
+that the child receives the expanded composed value, and verifies reset removes
+each configured key.
 Live log rotation closes and moves the active file
 when CopyAndTruncate is disabled, or copies and truncates the same active file
 when enabled; Windows integration tests check backup data, continued output and
