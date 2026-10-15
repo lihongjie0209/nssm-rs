@@ -474,6 +474,14 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         thread::sleep(Duration::from_millis(100));
     }
     assert!(running, "SCM never reported the wrapper as running");
+    let escaped_service = service.replace('\'', "''");
+    let start_control_event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1040}} -MaxEvents 500 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 'START') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&start_control_event),
+        "Application log contains event 1040 for the handled START control"
+    );
 
     let default_exit_policy = cli(&["get", &service, "AppExit", "Default"]);
     assert!(default_exit_policy.status.success());
@@ -510,6 +518,13 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         stopped.status.success(),
         "stop failed: {}",
         String::from_utf8_lossy(&stopped.stderr)
+    );
+    let stop_control_event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1040}} -MaxEvents 500 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 'STOP') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&stop_control_event),
+        "Application log contains event 1040 for the handled STOP control"
     );
     let status = cli(&["status", &service]);
     assert!(status.status.success());
@@ -2096,7 +2111,7 @@ fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
         String::from_utf8_lossy(&installed.stderr)
     );
     assert!(
-        cli(&["set", &service, "AppRestartDelay", "10000"])
+        cli(&["set", &service, "AppRestartDelay", "30000"])
             .status
             .success()
     );
@@ -2107,7 +2122,7 @@ fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
     );
     let escaped_service = service.replace('\'', "''");
     let restart_delay_script = format!(
-        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1072}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 10000) {{ exit 0 }} }}; exit 1"
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1072}} -MaxEvents 60 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 30000) {{ exit 0 }} }}; exit 1"
     );
     assert!(
         wait_for_windows_powershell_condition(&restart_delay_script),
@@ -2122,6 +2137,13 @@ fn continue_interrupts_restart_throttle_while_pause_leaves_it_waiting() {
     assert!(
         wait_for_service_state(&service, "SERVICE_PAUSED"),
         "Pause unexpectedly resumed the throttled service"
+    );
+    let pause_control_event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1041}} -MaxEvents 500 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 'PAUSE') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&pause_control_event),
+        "Application log contains event 1041 for the unsupported PAUSE control"
     );
     let continued = cli(&["continue", &service]);
     assert!(

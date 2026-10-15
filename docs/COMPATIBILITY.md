@@ -139,7 +139,7 @@ SCM lifecycle test also replays every command emitted by `dump` into a second
 service and reads back its application, arguments, and service type. Remaining
 acceptance scope includes hook ABI context parity for Power events, event-log compatibility
 beyond events 1001, 1006, 1008, 1010, 1013, 1014, 1015, 1016, 1020, 1034,
-1035, 1072 and 1077,
+1035, 1040, 1041, 1072 and 1077,
 broader error-path coverage, and command-by-command parity against the pinned
 reference. Missing-service exit status 3 is now covered for status, start, stop,
 restart, pause, continue, rotate, get, set, reset and confirmed remove.

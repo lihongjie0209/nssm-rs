@@ -59,6 +59,9 @@ const EVENT_RESET_THROTTLE: u32 = 0x4000_040b;
 const EVENT_THROTTLED: u32 = 0x8000_040a;
 const EVENT_RESTART_DELAY: u32 = 0x4000_0430;
 const EVENT_ROTATED: u32 = 0x4000_0435;
+const EVENT_SERVICE_CONTROL_HANDLED: u32 = 0x4000_0410;
+const EVENT_SERVICE_CONTROL_NOT_HANDLED: u32 = 0x4000_0411;
+const EVENT_SERVICE_CONTROL_UNKNOWN: u32 = 0x4000_0412;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
@@ -2805,6 +2808,26 @@ fn control_name(control: u32) -> &'static str {
     }
 }
 
+fn service_control_event(control: u32, handled: bool) -> (u32, String) {
+    let name = control_name(control);
+    if name.is_empty() {
+        (EVENT_SERVICE_CONTROL_UNKNOWN, format!("0x{control:08x}"))
+    } else if handled {
+        (EVENT_SERVICE_CONTROL_HANDLED, name.to_owned())
+    } else {
+        (EVENT_SERVICE_CONTROL_NOT_HANDLED, name.to_owned())
+    }
+}
+
+fn report_service_control(service: &str, control: u32, handled: bool) {
+    let (event, text) = service_control_event(control, handled);
+    report_event(
+        windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+        event,
+        &[service, &text],
+    );
+}
+
 fn hook_deadline_ms(event: &str, action: &str) -> u64 {
     if (event.eq_ignore_ascii_case("Start") || event.eq_ignore_ascii_case("Stop"))
         && action.eq_ignore_ascii_case("Pre")
@@ -3043,25 +3066,31 @@ unsafe extern "system" fn service_handler(
     match control {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
+            report_service_control(&wide_pointer(context.cast()), control, true);
             STOP_REQUESTED.store(true, Ordering::SeqCst);
             set_status(SERVICE_STOP_PENDING, 0, 10_000);
         }
         128 => {
             if !ROTATE_ENABLED.load(Ordering::SeqCst) {
+                report_service_control(&wide_pointer(context.cast()), control, false);
                 return 120;
             }
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
+            report_service_control(&wide_pointer(context.cast()), control, true);
             ROTATE_REQUESTED.store(true, Ordering::SeqCst);
         }
         SERVICE_CONTROL_POWEREVENT => {
             let Some(hook) = power_hook_action(event_type) else {
+                report_service_control(&wide_pointer(context.cast()), control, false);
                 return NO_ERROR;
             };
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
+            report_service_control(&wide_pointer(context.cast()), control, true);
             POWER_HOOK_REQUESTED.store(hook, Ordering::SeqCst);
         }
         SERVICE_CONTROL_CONTINUE => {
             HOOK_LAST_CONTROL.store(control, Ordering::SeqCst);
+            report_service_control(&wide_pointer(context.cast()), control, true);
             HOOK_THROTTLE_COUNT.store(0, Ordering::SeqCst);
             CONTINUE_REQUESTED.store(true, Ordering::SeqCst);
             let service = wide_pointer(context.cast());
@@ -3072,9 +3101,15 @@ unsafe extern "system" fn service_handler(
             );
             set_status(SERVICE_CONTINUE_PENDING, 0, 10_000);
         }
-        SERVICE_CONTROL_PAUSE => return 120,
+        SERVICE_CONTROL_PAUSE => {
+            report_service_control(&wide_pointer(context.cast()), control, false);
+            return 120;
+        }
         SERVICE_CONTROL_INTERROGATE => {}
-        _ => return 120,
+        _ => {
+            report_service_control(&wide_pointer(context.cast()), control, false);
+            return 120;
+        }
     }
     NO_ERROR
 }
@@ -3116,6 +3151,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         return;
     }
     SERVICE_STATUS_HANDLE_VALUE.store(handle as isize, Ordering::SeqCst);
+    report_service_control(&service_name, 0, true);
     set_status(SERVICE_START_PENDING, 0, 10_000);
     let _ = ensure_default_exit_action(&service_name);
     let config = (|| -> Result<(String, Vec<String>, Option<String>, Option<Vec<String>>, Vec<String>, Vec<String>, Option<String>, u32, bool, bool), String> {
@@ -3989,8 +4025,10 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, hook_deadline_ms, parse_u32,
-        power_hook_action, priority_name, priority_value, valid_hook,
+        EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
+        EVENT_SERVICE_CONTROL_UNKNOWN, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
+        SERVICE_CONTROL_PAUSE, hook_deadline_ms, parse_u32, power_hook_action, priority_name,
+        priority_value, service_control_event, valid_hook,
     };
 
     #[test]
@@ -4011,6 +4049,22 @@ mod tests {
         assert_eq!(power_hook_action(4), None);
         assert_eq!(power_hook_action(7), None);
         assert_eq!(power_hook_action(0xffff), None);
+    }
+
+    #[test]
+    fn service_control_events_distinguish_handled_unsupported_and_unknown_codes() {
+        assert_eq!(
+            service_control_event(0, true),
+            (EVENT_SERVICE_CONTROL_HANDLED, "START".into())
+        );
+        assert_eq!(
+            service_control_event(SERVICE_CONTROL_PAUSE, false),
+            (EVENT_SERVICE_CONTROL_NOT_HANDLED, "PAUSE".into())
+        );
+        assert_eq!(
+            service_control_event(200, false),
+            (EVENT_SERVICE_CONTROL_UNKNOWN, "0x000000c8".into())
+        );
     }
 
     #[test]
