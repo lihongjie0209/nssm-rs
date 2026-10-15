@@ -92,6 +92,20 @@ fn installs_starts_reports_stops_and_removes_a_simple_real_service() {
     assert!(application.status.success());
     assert_eq!(String::from_utf8_lossy(&application.stdout).trim(), ping);
 
+    let description = cli(&["set", &service, "Description", "smoke service"]);
+    assert!(description.status.success());
+    assert_eq!(
+        description.stdout,
+        format!("Set parameter \"Description\" for service \"{service}\".\r\r\n").as_bytes()
+    );
+    let reset_description = cli(&["reset", &service, "Description"]);
+    assert!(reset_description.status.success());
+    assert_eq!(
+        reset_description.stdout,
+        format!("Reset parameter \"Description\" for service \"{service}\" to its default.\r\r\n")
+            .as_bytes()
+    );
+
     let started = cli(&["start", &service]);
     assert!(
         started.status.success(),

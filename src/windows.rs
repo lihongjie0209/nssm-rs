@@ -980,7 +980,83 @@ fn get_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), S
     Ok(())
 }
 
+fn canonical_setting_name(parameter: &str) -> &str {
+    if let Some(setting) = nssm_rs::managed_setting(parameter) {
+        return setting.name;
+    }
+    const NATIVE_SETTINGS: &[&str] = &[
+        "DependOnGroup",
+        "DependOnService",
+        "Description",
+        "DisplayName",
+        "Environment",
+        "ImagePath",
+        "Name",
+        "ObjectName",
+        "Start",
+        "Type",
+    ];
+    NATIVE_SETTINGS
+        .iter()
+        .copied()
+        .find(|name| name.eq_ignore_ascii_case(parameter))
+        .unwrap_or(parameter)
+}
+
+fn set_is_reset_to_default(parameter: &str, values: &[String]) -> bool {
+    let Some(setting) = nssm_rs::managed_setting(parameter) else {
+        return match parameter.to_ascii_lowercase().as_str() {
+            "description" | "displayname" | "environment" => values.is_empty(),
+            "objectname" => {
+                values.is_empty()
+                    || values
+                        .first()
+                        .is_some_and(|value| value.eq_ignore_ascii_case("LocalSystem"))
+            }
+            _ => false,
+        };
+    };
+    match setting.kind {
+        SettingKind::Dword => setting
+            .default
+            .and_then(|default| default.parse::<u32>().ok())
+            .is_some_and(|default| {
+                values
+                    .join(" ")
+                    .parse::<u32>()
+                    .is_ok_and(|value| value == default)
+            }),
+        SettingKind::String => setting
+            .default
+            .is_some_and(|default| values.join(" ") == default),
+        SettingKind::MultiString => values.is_empty(),
+        SettingKind::Hook => values.get(1..).is_none_or(|command| command.is_empty()),
+        SettingKind::ExitAction => false,
+    }
+}
+
 fn set_setting(service: &str, parameter: &str, values: &[String]) -> Result<(), String> {
+    let result = set_setting_inner(service, parameter, values);
+    if result.is_ok() {
+        let service_name = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());
+        if set_is_reset_to_default(parameter, values) {
+            cli_println!(
+                "Reset parameter \"{}\" for service \"{}\" to its default.\r\r",
+                canonical_setting_name(parameter),
+                service_name
+            );
+        } else {
+            cli_println!(
+                "Set parameter \"{}\" for service \"{}\".\r\r",
+                canonical_setting_name(parameter),
+                service_name
+            );
+        }
+    }
+    result
+}
+
+fn set_setting_inner(service: &str, parameter: &str, values: &[String]) -> Result<(), String> {
     let Some(spec) = managed_setting(parameter) else {
         return set_native_setting(service, parameter, values);
     };
@@ -1090,6 +1166,19 @@ fn set_setting(service: &str, parameter: &str, values: &[String]) -> Result<(), 
 }
 
 fn reset_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), String> {
+    let result = reset_setting_inner(service, parameter, extra);
+    if result.is_ok() {
+        let service_name = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());
+        cli_println!(
+            "Reset parameter \"{}\" for service \"{}\" to its default.\r\r",
+            canonical_setting_name(parameter),
+            service_name
+        );
+    }
+    result
+}
+
+fn reset_setting_inner(service: &str, parameter: &str, extra: &[String]) -> Result<(), String> {
     let Some(spec) = managed_setting(parameter) else {
         return reset_native_setting(service, parameter, extra);
     };
