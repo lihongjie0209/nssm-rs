@@ -124,7 +124,6 @@ fn run_window_mode(
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, PostMessageW,
             PostQuitMessage, RegisterClassW, TranslateMessage, WM_APP, WM_CLOSE, WNDCLASSW,
-            WS_VISIBLE,
         },
     };
 
@@ -185,7 +184,7 @@ fn run_window_mode(
             0,
             class_name.as_ptr(),
             class_name.as_ptr(),
-            WS_VISIBLE,
+            0,
             0,
             0,
             0,
