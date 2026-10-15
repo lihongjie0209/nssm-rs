@@ -2670,7 +2670,9 @@ fn start(name: &str) -> Result<(), String> {
             return Err(error.to_string());
         }
     }
-    wait_state(service.0, SERVICE_RUNNING)
+    wait_state(service.0, SERVICE_RUNNING)?;
+    print_control_success(name, 0);
+    Ok(())
 }
 
 fn stop(name: &str) -> Result<(), String> {
@@ -2686,7 +2688,9 @@ fn stop(name: &str) -> Result<(), String> {
             return Err(error.to_string());
         }
     }
-    wait_state(service.0, SERVICE_STOPPED)
+    wait_state(service.0, SERVICE_STOPPED)?;
+    print_control_success(name, SERVICE_CONTROL_STOP);
+    Ok(())
 }
 
 fn control_simple(name: &str, control: u32) -> Result<(), String> {
@@ -2702,7 +2706,9 @@ fn control_simple(name: &str, control: u32) -> Result<(), String> {
         } else {
             SERVICE_RUNNING
         },
-    )
+    )?;
+    print_control_success(name, control);
+    Ok(())
 }
 
 fn rotate(name: &str) -> Result<(), String> {
@@ -2711,7 +2717,19 @@ fn rotate(name: &str) -> Result<(), String> {
     if unsafe { ControlService(service.0, 128, &mut status) } == 0 {
         return Err(io::Error::last_os_error().to_string());
     }
+    print_control_success(name, 128);
     Ok(())
+}
+
+fn print_control_success(service: &str, control: u32) {
+    let service_name = canonical_service_name(service).unwrap_or_else(|_| service.to_owned());
+    let success = windows_error_message(&io::Error::from_raw_os_error(0));
+    cli_println!(
+        "{}: {}: {}\r\r",
+        service_name,
+        control_name(control),
+        success
+    );
 }
 
 fn wait_state(service: SC_HANDLE, expected: u32) -> Result<(), String> {
