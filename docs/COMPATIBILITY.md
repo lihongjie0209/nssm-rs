@@ -126,6 +126,8 @@ round-trips and resets all 28 managed DWORD settings against the real service
 registry, including priority name normalization and each setting's default.
 The SCM lifecycle integration also changes a built-in account alias through
 `ObjectName` and validates `Start` by reading back its real SCM value.
+It exercises service dependencies through replacement, addition, removal and
+reset against the SCM configuration, and verifies group-dependency set/read/reset.
 Another Windows integration test round-trips and resets Application,
 AppParameters, AppDirectory, AppStdin, AppStdout and AppStderr, including a
 Unicode directory and paths containing spaces. The environment integration

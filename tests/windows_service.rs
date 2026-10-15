@@ -282,6 +282,20 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
             .success()
     );
 
+    let group_dependency = cli(&["set", &service, "DependOnGroup", "+NetworkProvider"]);
+    assert!(
+        group_dependency.status.success(),
+        "group dependency set failed: {}",
+        String::from_utf8_lossy(&group_dependency.stderr)
+    );
+    let group_dependency = cli(&["get", &service, "DependOnGroup"]);
+    assert!(group_dependency.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&group_dependency.stdout).trim(),
+        "+NetworkProvider"
+    );
+    assert!(cli(&["reset", &service, "DependOnGroup"]).status.success());
+
     let managed = cli(&["list"]);
     assert!(managed.status.success());
     assert!(
