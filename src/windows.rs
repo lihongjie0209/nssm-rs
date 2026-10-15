@@ -1012,6 +1012,26 @@ fn print_set_setting_error(service: &str, parameter: &str) {
     );
 }
 
+fn print_set_setting_failure(service: &str, parameter: &str, values: &[String]) {
+    if parameter.eq_ignore_ascii_case("AppPriority") && priority_value(&values.join(" ")).is_err() {
+        cli_eprintln!(
+            "Invalid process priority \"{}\".  Valid priorities are:\r\r",
+            values.join(" ")
+        );
+        for priority in [
+            "REALTIME_PRIORITY_CLASS",
+            "HIGH_PRIORITY_CLASS",
+            "ABOVE_NORMAL_PRIORITY_CLASS",
+            "NORMAL_PRIORITY_CLASS",
+            "BELOW_NORMAL_PRIORITY_CLASS",
+            "IDLE_PRIORITY_CLASS",
+        ] {
+            cli_eprintln!("{priority}\r");
+        }
+    }
+    print_set_setting_error(service, parameter);
+}
+
 fn set_is_reset_to_default(parameter: &str, values: &[String]) -> bool {
     let Some(setting) = nssm_rs::managed_setting(parameter) else {
         return match parameter.to_ascii_lowercase().as_str() {
@@ -6242,7 +6262,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
             match set_setting(&service, &parameter, &values) {
                 Ok(()) => Ok(0),
                 Err(_) => {
-                    print_set_setting_error(&service, &parameter);
+                    print_set_setting_failure(&service, &parameter, &values);
                     Ok(6)
                 }
             }
@@ -6286,7 +6306,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
             } if known_setting(&parameter) => match set_setting(&service, &parameter, &values) {
                 Ok(()) => Ok(0),
                 Err(_) => {
-                    print_set_setting_error(&service, &parameter);
+                    print_set_setting_failure(&service, &parameter, &values);
                     Ok(6)
                 }
             },
