@@ -2034,6 +2034,53 @@ fn applies_configured_priority_and_cpu_affinity_to_child_process() {
 }
 
 #[test]
+fn invalid_priority_registry_bits_log_event_and_fall_back_to_normal() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    assert!(
+        cli(&["install", &service, &command_prompt, "/c", "exit 0"])
+            .status
+            .success(),
+        "fixture service installs"
+    );
+
+    let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
+    let write_invalid_priority = format!(
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppPriority -PropertyType DWord -Value 65536 -Force"
+    );
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let written = Command::new(&powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &write_invalid_priority,
+        ])
+        .status()
+        .expect("PowerShell writes the isolated service setting");
+    assert!(written.success(), "invalid priority value is written");
+
+    let started = cli(&["start", &service]);
+    assert!(
+        started.status.success(),
+        "invalid priority falls back instead of preventing startup: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+
+    let escaped_service = service.replace('\'', "''");
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1066}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq '{escaped_service}' -and $event.Properties[1].Value -eq 'AppPriority') {{ exit 0 }} }}; exit 1"
+    );
+    assert!(
+        wait_for_windows_powershell_condition(&event),
+        "invalid AppPriority logs event 1066 with service name and setting"
+    );
+}
+
+#[test]
 fn timestamp_log_prefixes_each_child_output_line_in_utc() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());

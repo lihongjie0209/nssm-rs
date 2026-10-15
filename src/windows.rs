@@ -96,6 +96,8 @@ const EVENT_SERVICE_CONTROL_HANDLED: u32 = 0x4000_0410;
 const EVENT_SERVICE_CONTROL_NOT_HANDLED: u32 = 0x4000_0411;
 const EVENT_SERVICE_CONTROL_UNKNOWN: u32 = 0x4000_0412;
 const EVENT_KILL_PROCESS_TREE: u32 = 0x4000_0403;
+const EVENT_BOGUS_PRIORITY: u32 = 0x4000_042a;
+const PRIORITY_CLASS_MASK: u32 = 0x0000_c1e0;
 const SERVICE_LAUNCH_FAILURE_CODE: u32 = 3;
 const EVENT_SOURCE: &str = "nssm";
 const SERVICE_KEY_PREFIX: &str = "SYSTEM\\CurrentControlSet\\Services\\";
@@ -837,6 +839,10 @@ fn priority_name(value: u32) -> Result<&'static str, String> {
         0x100 => Ok("REALTIME_PRIORITY_CLASS"),
         _ => Err(format!("unknown application priority value: {value}")),
     }
+}
+
+fn valid_priority_class(value: u32) -> bool {
+    value & PRIORITY_CLASS_MASK == value
 }
 
 fn get_setting(service: &str, parameter: &str, extra: &[String]) -> Result<(), String> {
@@ -4414,7 +4420,17 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             }
         };
         let affinity = read_optional_reg_string(&service_name, "AppAffinity")?;
-        let priority = read_reg_dword(&service_name, "AppPriority", 0x20)?;
+        let configured_priority = read_reg_dword(&service_name, "AppPriority", 0x20)?;
+        let priority = if valid_priority_class(configured_priority) {
+            configured_priority
+        } else {
+            report_event(
+                windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                EVENT_BOGUS_PRIORITY,
+                &[&service_name, "AppPriority"],
+            );
+            0x20
+        };
         let no_console = read_reg_dword(&service_name, "AppNoConsole", 0)? != 0;
         let kill_process_tree = read_reg_dword(&service_name, "AppKillProcessTree", 1)? != 0;
         Ok(ServiceConfig {
@@ -5583,7 +5599,7 @@ mod tests {
         priority_name, priority_value, process_belongs_to_service_lifetime,
         process_open_error_output, process_tree_from_root, quote_dump_arg, remove,
         report_stdio_setup_failure, service_control_event, service_handler, service_main,
-        service_type_name, set_setting, valid_hook, wide,
+        service_type_name, set_setting, valid_hook, valid_priority_class, wide,
     };
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -6292,6 +6308,15 @@ mod tests {
         }
         assert!(priority_value("INVALID_PRIORITY_CLASS").is_err());
         assert!(priority_name(0).is_err());
+    }
+
+    #[test]
+    fn priority_class_mask_rejects_unrelated_flags_and_preserves_reference_values() {
+        for value in [0x20, 0x40, 0x80, 0x100, 0x4000, 0x8000, 0xc1e0] {
+            assert!(valid_priority_class(value), "{value:#x}");
+        }
+        assert!(!valid_priority_class(0x1_0000));
+        assert!(!valid_priority_class(0x20 | 0x1_0000));
     }
 
     #[test]
