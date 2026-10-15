@@ -6246,7 +6246,7 @@ pub fn execute(command: Command) -> Result<u8, String> {
                 Ok(()) => Ok(0),
                 Err(error) => {
                     if error.contains("has no meaningful default value!") {
-                        cli_eprintln!("{error}\r");
+                        cli_eprintln!("{error}\r\r");
                     } else {
                         cli_eprintln!("nssm-rs: {error}\r");
                     }
