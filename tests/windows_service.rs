@@ -957,6 +957,7 @@ fn unknown_setting_is_reported_before_missing_service_lookup() {
         vec!["get", service.as_str(), "NssmRUnknownSetting"],
         vec!["set", service.as_str(), "NssmRUnknownSetting", "value"],
         vec!["reset", service.as_str(), "NssmRUnknownSetting"],
+        vec!["unset", service.as_str(), "NssmRUnknownSetting"],
     ] {
         let output = cli(&args);
         assert_eq!(output.status.code(), Some(1), "args: {args:?}");

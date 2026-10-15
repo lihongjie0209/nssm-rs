@@ -51,6 +51,7 @@ $cases = @(
     @{ Name = 'reset on missing service'; Args = @('reset', 'NssmRDefinitelyMissingService', 'Start') },
     @{ Name = 'reset unknown setting on missing service'; Args = @('reset', 'NssmRDefinitelyMissingService', 'NssmRDefinitelyNotASetting') },
     @{ Name = 'unset on missing service'; Args = @('unset', 'NssmRDefinitelyMissingService', 'AppParameters') },
+    @{ Name = 'unset unknown setting on missing service'; Args = @('unset', 'NssmRDefinitelyMissingService', 'NssmRDefinitelyNotASetting') },
     @{ Name = 'case-insensitive GET'; Args = @('GET', 'Spooler', 'Start') },
     @{ Name = 'status Spooler'; Args = @('STATUS', 'Spooler') },
     @{ Name = 'statuscode Spooler'; Args = @('STATUSCODE', 'Spooler') },
