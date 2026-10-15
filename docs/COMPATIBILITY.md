@@ -98,6 +98,10 @@ numeric SCM state as its process exit code; query failure returns zero.
   statuses, side effects and observable process behavior. Document intentional
   differences (ideally none for the stated CLI target).
 
+Direct Windows reference checks are recorded in
+[`REFERENCE_COMPARISON.md`](REFERENCE_COMPARISON.md). That report is partial and
+does not satisfy the command-by-command release gate yet.
+
 ## Current status
 
 Command parsing, managed settings, AppEnvironment/AppEnvironmentExtra composition,
