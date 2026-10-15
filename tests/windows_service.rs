@@ -819,7 +819,15 @@ fn runs_configured_start_and_exit_hooks() {
     std::fs::create_dir(&hook_working_directory).expect("hook working directory is created");
     let cwd_marker = std::env::temp_dir().join(format!("{service}_hook_cwd.txt"));
     let cwd_marker = cwd_marker.to_string_lossy().into_owned();
-    let _files = FileCleanup([event_paths.clone(), vec![cwd_marker.clone()]].concat());
+    let abi_marker = std::env::temp_dir().join(format!("{service}_hook_abi.txt"));
+    let abi_marker = abi_marker.to_string_lossy().into_owned();
+    let _files = FileCleanup(
+        [
+            event_paths.clone(),
+            vec![cwd_marker.clone(), abi_marker.clone()],
+        ]
+        .concat(),
+    );
     let _directory = DirectoryCleanup(hook_working_directory.to_string_lossy().into_owned());
     let installed = cli(&["install", &service, &command_prompt, "/c", "exit 0"]);
     assert!(
@@ -850,7 +858,9 @@ fn runs_configured_start_and_exit_hooks() {
             format!("cmd.exe /c set NSSM_COMMAND_LINE>{path}")
         } else {
             if event_action == "Start/Pre" {
-                format!("cmd.exe /c echo {marker}>{path} & cd > {cwd_marker}")
+                format!(
+                    "cmd.exe /c echo {marker}>{path} & cd > {cwd_marker} & set NSSM_ > {abi_marker}"
+                )
             } else {
                 format!("cmd.exe /c echo {marker}>{path}")
             }
@@ -916,6 +926,56 @@ fn runs_configured_start_and_exit_hooks() {
             .trim(),
         hook_working_directory
     );
+    let abi = std::fs::read_to_string(&abi_marker).expect("hook ABI environment was captured");
+    let hook_environment = abi
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_ascii_uppercase(), value.trim().to_owned()))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        hook_environment
+            .get("NSSM_HOOK_VERSION")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        hook_environment.get("NSSM_VERSION").map(String::as_str),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(
+        hook_environment.get("NSSM_BUILD_DATE").map(String::as_str),
+        Some(env!("NSSM_BUILD_DATE"))
+    );
+    assert_eq!(
+        hook_environment
+            .get("NSSM_SERVICE_NAME")
+            .map(String::as_str),
+        Some(service.as_str())
+    );
+    assert_eq!(
+        hook_environment
+            .get("NSSM_SERVICE_DISPLAYNAME")
+            .map(String::as_str),
+        Some("Hook ABITest Service")
+    );
+    assert_eq!(
+        hook_environment
+            .get("NSSM_APPLICATION_PID")
+            .map(String::as_str),
+        Some("")
+    );
+    assert_eq!(
+        hook_environment.get("NSSM_EXITCODE").map(String::as_str),
+        Some("")
+    );
+    assert_eq!(
+        hook_environment
+            .get("NSSM_APPLICATION_RUNTIME")
+            .map(String::as_str),
+        Some("")
+    );
+    assert!(hook_environment["NSSM_PID"].parse::<u32>().unwrap() > 0);
+    assert!(std::path::Path::new(&hook_environment["NSSM_EXE"]).is_file());
     let start_post = std::fs::read_to_string(&event_paths[1]).unwrap();
     assert!(start_post.starts_with("NSSM_COMMAND_LINE=\""));
     assert!(start_post.contains("cmd.exe\""));
