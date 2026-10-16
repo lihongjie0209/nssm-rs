@@ -106,8 +106,10 @@ function Add-NormalizedDumpResult([System.Collections.Generic.List[object]] $Res
     })
 }
 
-function Wait-ServiceState([string] $Binary, [string] $Service, [string] $State) {
-    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+function Wait-ServiceState([string] $Binary, [string] $Service, [string] $State,
+    [int] $TimeoutSeconds = 10) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
         $result = Invoke-Cli $Binary @('status', $Service)
         if ($result.ExitCode -eq 0) {
             $stdout = [Text.Encoding]::Default.GetString([Convert]::FromBase64String($result.Stdout))
@@ -393,50 +395,110 @@ function Run-FailedRestartScenario([string] $Binary, [string] $Service) {
         Move-Item -LiteralPath $application -Destination $unavailable
 
         $deadline = (Get-Date).AddSeconds(30)
-        $event = $null
-        while ((Get-Date) -lt $deadline -and -not $event) {
-            $event = Get-WinEvent -FilterHashtable @{
+        $launchEvent = $null
+        $alreadyStoppedEvent = $null
+        $startFailureEvent = $null
+        $retryEvent = $null
+        while ((Get-Date) -lt $deadline -and (-not $launchEvent -or -not $alreadyStoppedEvent -or -not $startFailureEvent -or -not $retryEvent)) {
+            $events = Get-WinEvent -FilterHashtable @{
                 LogName = 'Application'
                 ProviderName = 'nssm'
-                Id = 1007
-            } -MaxEvents 100 -ErrorAction SilentlyContinue |
+                Id = @(1006, 1007, 1010, 1012)
+            } -MaxEvents 200 -ErrorAction SilentlyContinue |
+                Where-Object { $_.TimeCreated -ge $startedAt }
+            $launchEvent = $events |
                 Where-Object {
-                    $_.TimeCreated -ge $startedAt -and
-                    $_.Properties.Count -ge 2 -and
+                    $_.Id -eq 1010 -and $_.Properties.Count -ge 3 -and
+                    [string]$_.Properties[0].Value -eq $Service -and
+                    [string]$_.Properties[1].Value -eq $application -and
+                    [string]$_.Properties[2].Value
+                } |
+                Select-Object -First 1
+            $alreadyStoppedEvent = $events |
+                Where-Object {
+                    $_.Id -eq 1012 -and $_.Properties.Count -ge 2 -and
+                    [string]$_.Properties[0].Value -eq $Service -and
+                    [string]$_.Properties[1].Value -eq $application
+                } |
+                Select-Object -First 1
+            $startFailureEvent = $events |
+                Where-Object {
+                    $_.Id -eq 1006 -and $_.Properties.Count -ge 3 -and
+                    [string]$_.Properties[0].Value -eq $application -and
+                    [string]$_.Properties[1].Value -eq $Service -and
+                    [string]$_.Properties[2].Value -eq '3'
+                } |
+                Select-Object -First 1
+            $retryEvent = $events |
+                Where-Object {
+                    $_.Id -eq 1007 -and $_.Properties.Count -ge 2 -and
                     [string]$_.Properties[0].Value -eq $application -and
                     [string]$_.Properties[1].Value -eq $Service
                 } |
                 Select-Object -First 1
-            if (-not $event) {
+            if (-not $launchEvent -or -not $alreadyStoppedEvent -or -not $startFailureEvent -or -not $retryEvent) {
                 Start-Sleep -Milliseconds 200
             }
         }
-        if (-not $event) {
+        if (-not $launchEvent -or -not $alreadyStoppedEvent -or -not $startFailureEvent -or -not $retryEvent) {
+            $missingEvents = @()
+            if (-not $launchEvent) { $missingEvents += '1010' }
+            if (-not $alreadyStoppedEvent) { $missingEvents += '1012' }
+            if (-not $startFailureEvent) { $missingEvents += '1006' }
+            if (-not $retryEvent) { $missingEvents += '1007' }
+            $observedEvents = @($events | ForEach-Object {
+                $values = ($_.Properties | ForEach-Object { [string]$_.Value }) -join '|'
+                "id=$($_.Id) values=[$values]"
+            }) -join '; '
             $lastStatus = Invoke-Cli $Binary @('status', $Service)
             $lastExitAction = Invoke-Cli $Binary @('get', $Service, 'AppExit', '23')
             $lastStatusText = [Text.Encoding]::Default.GetString(
                 [Convert]::FromBase64String($lastStatus.Stdout)).Trim()
             $lastExitActionText = [Text.Encoding]::Default.GetString(
                 [Convert]::FromBase64String($lastExitAction.Stdout)).Trim()
-            throw "NSSM did not log event 1007 for failed restart of $Service; state=$lastStatusText exit-action=$lastExitActionText"
+            throw "Binary [$Binary] did not log failed-restart event(s) [$($missingEvents -join ',')] for $Service; observed=[$observedEvents] state=$lastStatusText exit-action=$lastExitActionText"
         }
-        $eventValues = @($event.Properties | ForEach-Object { [string]$_.Value })
-        $eventRecord = "$($event.Id)`n$($eventValues -join "`n")"
+        $retryDelayStarted = [DateTime]::UtcNow
+        $launchError = [string]$launchEvent.Properties[2].Value
+        $launchEventRecord = "1010`n$Service`n$application`n$launchError"
+        $results.Add([pscustomobject]@{
+            Label = 'failed restart event 1010'
+            ExitCode = 0
+            Stdout = [Convert]::ToBase64String([Text.Encoding]::Default.GetBytes($launchEventRecord))
+            Stderr = [Convert]::ToBase64String([byte[]]@())
+        })
+        $alreadyStoppedRecord = "1012`n$Service`n$application"
+        $results.Add([pscustomobject]@{
+            Label = 'failed restart event 1012'
+            ExitCode = 0
+            Stdout = [Convert]::ToBase64String([Text.Encoding]::Default.GetBytes($alreadyStoppedRecord))
+            Stderr = [Convert]::ToBase64String([byte[]]@())
+        })
+        $startFailureRecord = "1006`n$application`n$Service`n3"
+        $results.Add([pscustomobject]@{
+            Label = 'failed restart event 1006'
+            ExitCode = 0
+            Stdout = [Convert]::ToBase64String([Text.Encoding]::Default.GetBytes($startFailureRecord))
+            Stderr = [Convert]::ToBase64String([byte[]]@())
+        })
+        $retryEventRecord = "1007`n$application`n$Service"
         $results.Add([pscustomobject]@{
             Label = 'failed restart event 1007'
             ExitCode = 0
-            Stdout = [Convert]::ToBase64String([Text.Encoding]::Default.GetBytes($eventRecord))
+            Stdout = [Convert]::ToBase64String([Text.Encoding]::Default.GetBytes($retryEventRecord))
             Stderr = [Convert]::ToBase64String([byte[]]@())
         })
-
-        $active = Invoke-Cli $Binary @('status', $Service)
-        $activeState = [Text.Encoding]::Default.GetString(
-            [Convert]::FromBase64String($active.Stdout)).Trim()
-        if ($active.ExitCode -ne 0 -or
-            $activeState -notin @('SERVICE_START_PENDING', 'SERVICE_PAUSED')) {
-            throw "Service left retry lifecycle after event 1007: $activeState"
+        Wait-ServiceState $Binary $Service 'SERVICE_STOPPED'
+        Add-Result $results $Binary 'failed restart stopped status' `
+            @('status', $Service) | Out-Null
+        Move-Item -LiteralPath $unavailable -Destination $application
+        Wait-ServiceState $Binary $Service 'SERVICE_RUNNING' 40
+        if ([DateTime]::UtcNow - $retryDelayStarted -lt [TimeSpan]::FromSeconds(29)) {
+            throw "NSSM retried failed start before the expected 30-second delay"
         }
-        Add-Result $results $Binary 'failed restart stop' `
+        Add-Result $results $Binary 'failed restart recovered status' `
+            @('status', $Service) | Out-Null
+        Add-Result $results $Binary 'failed restart stop after recovery' `
             @('stop', $Service) | Out-Null
         Wait-ServiceState $Binary $Service 'SERVICE_STOPPED'
         Add-Result $results $Binary 'failed restart remove' `

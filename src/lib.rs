@@ -527,13 +527,13 @@ pub enum ExitAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchFailureDisposition {
     StopService,
-    Retry,
+    RetryAfterDelay,
     StopRequested,
 }
 
 /// Select the service lifecycle after a child process could not be created.
-/// A first launch failure fails service startup; a later failure belongs to
-/// an already active restart policy and should be retried unless stopped.
+/// NSSM fails initial startup, but waits 30 seconds before retrying a failed
+/// application restart.
 pub fn launch_failure_disposition(
     application_started: bool,
     stop_requested: bool,
@@ -541,7 +541,7 @@ pub fn launch_failure_disposition(
     if stop_requested {
         LaunchFailureDisposition::StopRequested
     } else if application_started {
-        LaunchFailureDisposition::Retry
+        LaunchFailureDisposition::RetryAfterDelay
     } else {
         LaunchFailureDisposition::StopService
     }
@@ -810,6 +810,51 @@ pub fn expand_environment_value(value: &str, entries: &[String]) -> String {
     output
 }
 
+/// Prefix each line in a captured application stream with a timestamp.
+/// `char_width` is the byte width of each source character (one for bytes,
+/// two for Windows UTF-16LE output).
+pub fn timestamp_stream_chunk(
+    input: &[u8],
+    char_width: usize,
+    timestamp: &str,
+    mut at_line_start: bool,
+) -> (Vec<u8>, bool) {
+    let char_width = if char_width == 2 { 2 } else { 1 };
+    let timestamp_bytes = if char_width == 2 {
+        timestamp
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    } else {
+        timestamp.as_bytes().to_vec()
+    };
+    let mut output = Vec::with_capacity(input.len() + timestamp_bytes.len());
+    for character in input.chunks_exact(char_width) {
+        if at_line_start {
+            output.extend_from_slice(&timestamp_bytes);
+            at_line_start = false;
+        }
+        output.extend_from_slice(character);
+        let line_feed = if char_width == 2 {
+            character == [b'\n', 0]
+        } else {
+            character == [b'\n']
+        };
+        if line_feed {
+            at_line_start = true;
+        }
+    }
+    let consumed = input.len() / char_width * char_width;
+    if consumed < input.len() {
+        if at_line_start {
+            output.extend_from_slice(&timestamp_bytes);
+        }
+        output.extend_from_slice(&input[consumed..]);
+        at_line_start = false;
+    }
+    (output, at_line_start)
+}
+
 pub fn log_rotation_due(
     size_bytes: u64,
     age: Duration,
@@ -1035,23 +1080,45 @@ mod policy_tests {
     use super::*;
 
     #[test]
-    fn child_launch_failure_distinguishes_startup_restart_and_stop() {
+    fn child_launch_failure_policy_matches_initial_and_restart_lifecycles() {
         assert_eq!(
             launch_failure_disposition(false, false),
             LaunchFailureDisposition::StopService
         );
         assert_eq!(
             launch_failure_disposition(true, false),
-            LaunchFailureDisposition::Retry
+            LaunchFailureDisposition::RetryAfterDelay
         );
         assert_eq!(
             launch_failure_disposition(true, true),
             LaunchFailureDisposition::StopRequested
         );
-        assert_eq!(
-            launch_failure_disposition(false, true),
-            LaunchFailureDisposition::StopRequested
-        );
+    }
+
+    #[test]
+    fn timestamp_prefixes_ascii_lines_across_stream_chunks() {
+        let (first, line_start) = timestamp_stream_chunk(b"one\n", 1, "t: ", true);
+        assert_eq!(first, b"t: one\n");
+        assert!(line_start);
+
+        let (second, line_start) = timestamp_stream_chunk(b"two", 1, "t: ", line_start);
+        assert_eq!(second, b"t: two");
+        assert!(!line_start);
+    }
+
+    #[test]
+    fn timestamp_prefixes_utf16le_lines_without_changing_encoding() {
+        let input = "one\ntwo\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let (output, line_start) = timestamp_stream_chunk(&input, 2, "t: ", true);
+        let expected = "t: one\nt: two\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(output, expected);
+        assert!(line_start);
     }
 
     #[test]
@@ -1157,7 +1224,18 @@ mod policy_tests {
                 "OTHER=C:\\bin;C:\\App;C:\\Temp"
             ]
         );
-        assert!(compose_child_environment(&[], None, &["BROKEN".into()]).is_err());
+        assert_eq!(
+            compose_child_environment(&[], None, &["BROKEN".into()])
+                .unwrap_err()
+                .to_string(),
+            "environment entry must use KEY=VALUE: BROKEN"
+        );
+        assert_eq!(
+            compose_child_environment(&[], Some(&["=value".into()]), &[])
+                .unwrap_err()
+                .to_string(),
+            "environment variable name cannot be empty"
+        );
     }
 
     #[test]

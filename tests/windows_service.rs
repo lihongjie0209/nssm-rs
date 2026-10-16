@@ -2,12 +2,20 @@
 
 use std::{
     io::Write,
-    os::windows::io::AsRawHandle,
+    os::windows::{io::AsRawHandle, process::CommandExt},
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn hidden_powershell(powershell: &str) -> Command {
+    let mut command = Command::new(powershell);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
 
 static SERVICE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const HOOK_ABI_VARIABLES: [&str; 22] = [
@@ -227,7 +235,7 @@ fn wait_for_windows_powershell_condition(script: &str) -> bool {
     let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if Command::new(&powershell)
+        if hidden_powershell(&powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .status()
             .is_ok_and(|status| status.success())
@@ -425,6 +433,29 @@ fn installs_runs_stops_and_removes_a_real_scm_service() {
         cli(&["set", &service, "Start", "SERVICE_AUTO_START"])
             .status
             .success()
+    );
+    assert!(
+        cli(&["set", &service, "Start", "SERVICE_DELAYED_AUTO_START"])
+            .status
+            .success(),
+        "setting delayed automatic start succeeds"
+    );
+    let start_type = cli(&["get", &service, "Start"]);
+    assert!(start_type.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&start_type.stdout).trim(),
+        "SERVICE_DELAYED_AUTO_START"
+    );
+    assert!(
+        cli(&["set", &service, "Start", "SERVICE_AUTO_START"])
+            .status
+            .success()
+    );
+    let start_type = cli(&["get", &service, "Start"]);
+    assert!(start_type.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&start_type.stdout).trim(),
+        "SERVICE_AUTO_START"
     );
 
     let invalid_start = cli(&["set", &service, "Start", "NOT_A_START_TYPE"]);
@@ -1294,7 +1325,7 @@ fn logs_child_process_launch_failures_to_the_application_event_log() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut event_found = false;
     while Instant::now() < deadline {
-        event_found = Command::new(&powershell)
+        event_found = hidden_powershell(&powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .status()
             .is_ok_and(|status| status.success());
@@ -1314,7 +1345,7 @@ fn logs_child_process_launch_failures_to_the_application_event_log() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut event_found = false;
     while Instant::now() < deadline {
-        event_found = Command::new(&powershell)
+        event_found = hidden_powershell(&powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .status()
             .is_ok_and(|status| status.success());
@@ -1360,7 +1391,7 @@ fn logs_service_dispatcher_failures_to_the_application_event_log() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut event_found = false;
     while Instant::now() < deadline {
-        event_found = Command::new(&powershell)
+        event_found = hidden_powershell(&powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .status()
             .is_ok_and(|status| status.success());
@@ -1402,7 +1433,7 @@ fn logs_successful_child_process_starts_to_the_application_event_log() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut event_found = false;
     while Instant::now() < deadline {
-        event_found = Command::new(&powershell)
+        event_found = hidden_powershell(&powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .status()
             .is_ok_and(|status| status.success());
@@ -1423,7 +1454,7 @@ fn logs_successful_child_process_starts_to_the_application_event_log() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut event_found = false;
     while Instant::now() < deadline {
-        event_found = Command::new(&powershell)
+        event_found = hidden_powershell(&powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .status()
             .is_ok_and(|status| status.success());
@@ -1465,7 +1496,7 @@ fn logs_application_exit_code_and_exit_action_to_the_event_log() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut events_found = false;
     while Instant::now() < deadline {
-        events_found = Command::new(&powershell)
+        events_found = hidden_powershell(&powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .status()
             .is_ok_and(|status| status.success());
@@ -1887,7 +1918,7 @@ fn unreadable_hook_configuration_logs_event_1081_and_does_not_abort_service_star
     let deny_system_read = format!(
         "$path = '{registry_path}'; $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($path, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions); if ($null -eq $key) {{ throw 'Unable to open hook key for ACL update' }}; try {{ $acl = $key.GetAccessControl(); $rule = New-Object System.Security.AccessControl.RegistryAccessRule('NT AUTHORITY\\SYSTEM', [System.Security.AccessControl.RegistryRights]::ReadKey, [System.Security.AccessControl.InheritanceFlags]::ContainerInherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Deny); $acl.AddAccessRule($rule); $key.SetAccessControl($acl) }} finally {{ $key.Close() }}"
     );
-    let permission = Command::new(&powershell)
+    let permission = hidden_powershell(&powershell)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -2358,7 +2389,7 @@ fn invalid_runtime_registry_values_log_events_and_fall_back_to_defaults() {
     );
     let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-    let written = Command::new(&powershell)
+    let written = hidden_powershell(&powershell)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -2425,6 +2456,59 @@ fn invalid_runtime_registry_values_log_events_and_fall_back_to_defaults() {
 }
 
 #[test]
+fn malformed_environment_entries_report_event_1038_before_service_start_fails() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let command_prompt = format!("{windows}\\System32\\cmd.exe");
+    assert!(
+        cli(&["install", &service, &command_prompt, "/c", "exit 0"])
+            .status
+            .success(),
+        "temporary service installs"
+    );
+
+    let registry_key = format!("HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{service}\\Parameters");
+    let write_invalid_environment = format!(
+        "New-ItemProperty -LiteralPath '{registry_key}' -Name AppEnvironmentExtra -PropertyType MultiString -Value @('invalid-without-assignment') -Force"
+    );
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let written = hidden_powershell(&powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &write_invalid_environment,
+        ])
+        .status()
+        .expect("PowerShell writes an invalid REG_MULTI_SZ value");
+    assert!(written.success(), "invalid environment value is written");
+
+    let started = cli(&["start", &service]);
+    assert!(
+        !started.status.success(),
+        "malformed environment prevents child startup"
+    );
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+
+    let event = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1038}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ $p = $event.Properties; if ($p.Count -eq 3 -and $p[0].Value -eq '{service}' -and $p[1].Value -eq '{command_prompt}' -and $p[2].Value -eq 'AppEnvironmentExtra' -and $event.Message.Contains('ERROR_INVALID_PARAMETER')) {{ exit 0 }} }}; exit 1"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if hidden_powershell(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &event])
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    panic!("Application log contains event 1038 for AppEnvironmentExtra");
+}
+
+#[test]
 fn unavailable_affinity_bits_log_effective_mask_and_constrain_the_child() {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
 
@@ -2474,7 +2558,7 @@ fn unavailable_affinity_bits_log_effective_mask_and_constrain_the_child() {
         "New-ItemProperty -LiteralPath '{registry_key}' -Name AppAffinity -PropertyType String -Value '{requested}' -Force"
     );
     assert!(
-        Command::new(&powershell)
+        hidden_powershell(&powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &set_affinity])
             .status()
             .is_ok_and(|status| status.success()),
@@ -2526,7 +2610,7 @@ fn invalid_stop_method_skip_type_logs_event_and_keeps_all_stop_methods() {
     );
     let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
     assert!(
-        Command::new(&powershell)
+        hidden_powershell(&powershell)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -2573,7 +2657,7 @@ fn short_non_dword_stop_skip_value_uses_the_successfully_read_data() {
     );
     let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
     assert!(
-        Command::new(&powershell)
+        hidden_powershell(&powershell)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -2628,7 +2712,7 @@ fn invalid_stop_grace_period_type_uses_default_and_logs_event() {
         "New-ItemProperty -LiteralPath '{registry_key}' -Name AppStopMethodConsole -PropertyType String -Value 'invalid-delay' -Force"
     );
     assert!(
-        Command::new(&powershell)
+        hidden_powershell(&powershell)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -2724,6 +2808,64 @@ fn timestamp_log_prefixes_each_child_output_line_in_utc() {
         assert_eq!(&timestamp[16..17], ":");
         assert_eq!(&timestamp[19..20], ".");
     }
+}
+
+#[test]
+fn timestamp_log_preserves_utf16_streams_and_writes_a_bom() {
+    let service = unique_service_name();
+    let _cleanup = Cleanup(service.clone());
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let output_path = std::env::temp_dir().join(format!("{service}_utf16.log"));
+    let output_path = output_path.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![output_path.clone()]);
+    let script = "$bytes = [Text.Encoding]::Unicode.GetBytes('wide-marker' + \"`r`n\"); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)";
+    let installed = cli(&[
+        "install",
+        &service,
+        &powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+    ]);
+    assert!(
+        installed.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        cli(&["set", &service, "AppStdout", &output_path])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppTimestampLog", "1"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["set", &service, "AppExit", "Default", "Exit"])
+            .status
+            .success()
+    );
+    assert!(cli(&["start", &service]).status.success());
+    assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
+
+    let output = std::fs::read(&output_path).expect("UTF-16 timestamp log exists");
+    assert!(
+        output.starts_with(&[0xff, 0xfe]),
+        "missing UTF-16LE BOM: {output:?}"
+    );
+    let code_units = output[2..]
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    let output = String::from_utf16(&code_units).expect("timestamped output remains UTF-16");
+    let (timestamp, _) = output
+        .split_once(": wide-marker")
+        .expect("timestamped child text is present");
+    assert_eq!(timestamp.len(), 23, "unexpected UTC timestamp: {timestamp}");
 }
 
 #[test]
@@ -3317,7 +3459,7 @@ fn restarts_child_for_configured_exit_code_until_service_is_stopped() {
 }
 
 #[test]
-fn failed_restart_launch_is_logged_and_retried_until_stopped() {
+fn failed_restart_launch_stops_service_then_retries_after_delay() {
     let service = unique_service_name();
     let _cleanup = Cleanup(service.clone());
     let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
@@ -3372,26 +3514,40 @@ fn failed_restart_launch_is_logged_and_retried_until_stopped() {
         .expect("make application unavailable during the configured restart delay");
 
     let script = format!(
-        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1007}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{application}' -and $event.Properties[1].Value -eq '{service}') {{ exit 0 }} }}; exit 1"
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1006,1007,1010,1012)}} -MaxEvents 300 -ErrorAction SilentlyContinue; $launch = $false; $alreadyStopped = $false; $start = $false; $retry = $false; foreach ($event in $events) {{ if ($event.Id -eq 1010 -and $event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq '{application}') {{ $launch = $true }}; if ($event.Id -eq 1012 -and $event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq '{application}') {{ $alreadyStopped = $true }}; if ($event.Id -eq 1006 -and $event.Properties.Count -ge 3 -and $event.Properties[0].Value -eq '{application}' -and $event.Properties[1].Value -eq '{service}' -and $event.Properties[2].Value -eq 3) {{ $start = $true }}; if ($event.Id -eq 1007 -and $event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{application}' -and $event.Properties[1].Value -eq '{service}') {{ $retry = $true }} }}; if ($launch -and $alreadyStopped -and $start -and $retry) {{ exit 0 }}; exit 1"
     );
     assert!(
         wait_for_windows_powershell_condition(&script),
-        "Application log records event 1007 for the failed restart launch"
+        "Application log records CreateProcess failure 1010, already-stopped event 1012, service start failure 1006, and retry warning 1007"
     );
-    let active = cli(&["status", &service]);
+    let retry_delay_started = Instant::now();
     assert!(
-        active.status.success()
-            && matches!(
-                String::from_utf8_lossy(&active.stdout).trim(),
-                "SERVICE_START_PENDING" | "SERVICE_PAUSED"
-            ),
-        "service remains in its retry lifecycle after failed restart: {}",
-        String::from_utf8_lossy(&active.stdout)
+        wait_for_service_state(&service, "SERVICE_STOPPED"),
+        "SCM observes SERVICE_STOPPED while NSSM waits before retrying"
+    );
+    std::fs::rename(&unavailable, &application)
+        .expect("restore the application before NSSM's 30-second retry");
+    let retry_deadline = Instant::now() + Duration::from_secs(40);
+    let mut restarted = false;
+    while Instant::now() < retry_deadline {
+        let status = cli(&["status", &service]);
+        if status.status.success()
+            && String::from_utf8_lossy(&status.stdout).trim() == "SERVICE_RUNNING"
+        {
+            restarted = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(restarted, "NSSM retries the application after 30 seconds");
+    assert!(
+        retry_delay_started.elapsed() >= Duration::from_secs(29),
+        "restart retry must wait approximately 30 seconds"
     );
     let stopped = cli(&["stop", &service]);
     assert!(
         stopped.status.success(),
-        "stop failed during restart retry: {}",
+        "stop after successful retry failed: {}",
         String::from_utf8_lossy(&stopped.stderr)
     );
     assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
@@ -3426,11 +3582,11 @@ fn stdio_file_creation_failure_logs_reference_events_and_stops_startup() {
     assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
 
     let script = format!(
-        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1006,1049,1051)}} -MaxEvents 300 -ErrorAction SilentlyContinue; $create = $false; $handles = $false; $start = $false; foreach ($event in $events) {{ if ($event.Id -eq 1049 -and $event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{stdout_path}') {{ $create = $true }}; if ($event.Id -eq 1051 -and $event.Properties.Count -ge 1 -and $event.Properties[0].Value -eq '{service}') {{ $handles = $true }}; if ($event.Id -eq 1006 -and $event.Properties.Count -ge 3 -and $event.Properties[0].Value -eq '{command_prompt}' -and $event.Properties[1].Value -eq '{service}' -and $event.Properties[2].Value -eq 4) {{ $start = $true }} }}; if ($create -and $handles -and $start) {{ exit 0 }}; exit 1"
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1006,1012,1049,1051)}} -MaxEvents 300 -ErrorAction SilentlyContinue; $create = $false; $handles = $false; $stopped = $false; $start = $false; foreach ($event in $events) {{ if ($event.Id -eq 1049 -and $event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{stdout_path}') {{ $create = $true }}; if ($event.Id -eq 1051 -and $event.Properties.Count -ge 1 -and $event.Properties[0].Value -eq '{service}') {{ $handles = $true }}; if ($event.Id -eq 1012 -and $event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq '{command_prompt}') {{ $stopped = $true }}; if ($event.Id -eq 1006 -and $event.Properties.Count -ge 3 -and $event.Properties[0].Value -eq '{command_prompt}' -and $event.Properties[1].Value -eq '{service}' -and $event.Properties[2].Value -eq 4) {{ $start = $true }} }}; if ($create -and $handles -and $stopped -and $start) {{ exit 0 }}; exit 1"
     );
     assert!(
         wait_for_windows_powershell_condition(&script),
-        "Application log records CreateFile failure 1049, output setup failure 1051, and service start failure 1006 with exit code 4"
+        "Application log records CreateFile failure 1049, output setup failure 1051, already-stopped event 1012, and service start failure 1006 with exit code 4"
     );
     assert!(
         !std::path::Path::new(&stdout_path).exists(),
@@ -3466,7 +3622,7 @@ fn invalid_stdio_numeric_setting_logs_query_and_startup_failure_events() {
     );
     let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
     assert!(
-        Command::new(&powershell)
+        hidden_powershell(&powershell)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -3480,11 +3636,11 @@ fn invalid_stdio_numeric_setting_logs_query_and_startup_failure_events() {
     let _ = cli(&["start", &service]);
     assert!(wait_for_service_state(&service, "SERVICE_STOPPED"));
     let script = format!(
-        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1006,1018,1051)}} -MaxEvents 300 -ErrorAction SilentlyContinue; $query = $false; $handles = $false; $start = $false; foreach ($event in $events) {{ if ($event.Id -eq 1018 -and $event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq 'AppStdoutCopyAndTruncate') {{ $query = $true }}; if ($event.Id -eq 1051 -and $event.Properties.Count -ge 1 -and $event.Properties[0].Value -eq '{service}') {{ $handles = $true }}; if ($event.Id -eq 1006 -and $event.Properties.Count -ge 3 -and $event.Properties[0].Value -eq '{command_prompt}' -and $event.Properties[1].Value -eq '{service}' -and $event.Properties[2].Value -eq 4) {{ $start = $true }} }}; if ($query -and $handles -and $start) {{ exit 0 }}; exit 1"
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1006,1012,1018,1051)}} -MaxEvents 300 -ErrorAction SilentlyContinue; $query = $false; $handles = $false; $stopped = $false; $start = $false; foreach ($event in $events) {{ if ($event.Id -eq 1018 -and $event.Properties.Count -eq 2 -and $event.Properties[0].Value -eq 'AppStdoutCopyAndTruncate') {{ $query = $true }}; if ($event.Id -eq 1051 -and $event.Properties.Count -ge 1 -and $event.Properties[0].Value -eq '{service}') {{ $handles = $true }}; if ($event.Id -eq 1012 -and $event.Properties.Count -ge 2 -and $event.Properties[0].Value -eq '{service}' -and $event.Properties[1].Value -eq '{command_prompt}') {{ $stopped = $true }}; if ($event.Id -eq 1006 -and $event.Properties.Count -ge 3 -and $event.Properties[0].Value -eq '{command_prompt}' -and $event.Properties[1].Value -eq '{service}' -and $event.Properties[2].Value -eq 4) {{ $start = $true }} }}; if ($query -and $handles -and $stopped -and $start) {{ exit 0 }}; exit 1"
     );
     assert!(
         wait_for_windows_powershell_condition(&script),
-        "invalid stdio flag logs query error 1018, output setup failure 1051, and start failure 1006"
+        "invalid stdio flag logs query error 1018, output setup failure 1051, already-stopped event 1012, and start failure 1006"
     );
 }
 

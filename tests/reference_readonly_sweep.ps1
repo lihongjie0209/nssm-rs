@@ -59,7 +59,6 @@ $cases = @(
     @{ Name = 'pause missing service'; Args = @('pause', 'NssmRDefinitelyMissingService') },
     @{ Name = 'continue missing service'; Args = @('continue', 'NssmRDefinitelyMissingService') },
     @{ Name = 'rotate missing service'; Args = @('rotate', 'NssmRDefinitelyMissingService') },
-    @{ Name = 'remove missing service with confirmation'; Args = @('remove', 'NssmRDefinitelyMissingService', 'confirm') },
     @{ Name = 'case-insensitive GET'; Args = @('GET', 'Spooler', 'Start') },
     @{ Name = 'status Spooler'; Args = @('STATUS', 'Spooler') },
     @{ Name = 'statuscode Spooler'; Args = @('STATUSCODE', 'Spooler') },
@@ -154,11 +153,40 @@ function Invoke-ReadOnlyCase([string] $Binary, [string[]] $Arguments) {
     $stdoutPath = [IO.Path]::GetTempFileName()
     $stderrPath = [IO.Path]::GetTempFileName()
     $argumentLine = ($Arguments | ForEach-Object { Quote-WindowsArgument $_ }) -join ' '
-    $process = Start-Process -FilePath $Binary -ArgumentList $argumentLine -NoNewWindow -PassThru `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-    if (-not $process.WaitForExit(60000)) {
-        $process.Kill($true)
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Binary
+    $startInfo.Arguments = $argumentLine
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutFile = [IO.File]::Open($stdoutPath, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+    $stderrFile = [IO.File]::Open($stderrPath, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+    $stdoutCopy = $process.StandardOutput.BaseStream.CopyToAsync($stdoutFile)
+    $stderrCopy = $process.StandardError.BaseStream.CopyToAsync($stderrFile)
+    $timedOut = -not $process.WaitForExit(60000)
+    if ($timedOut) {
+        $process.Kill()
         $process.WaitForExit()
+    }
+    $process.WaitForExit()
+    $null = $stdoutCopy.GetAwaiter().GetResult()
+    $null = $stderrCopy.GetAwaiter().GetResult()
+    $exitCode = $process.ExitCode
+    $stdoutFile.Dispose()
+    $stderrFile.Dispose()
+    $process.Dispose()
+    if ($exitCode -eq $null) {
+        Remove-Item $stdoutPath, $stderrPath -Force
+        throw "Unable to read process exit code: $Binary $argumentLine"
+    }
+    if ($stdoutCopy.Status -ne [System.Threading.Tasks.TaskStatus]::RanToCompletion -or
+        $stderrCopy.Status -ne [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
+        Remove-Item $stdoutPath, $stderrPath -Force
+        throw "Failed to capture redirected output: $Binary $argumentLine"
+    }
+    if ($timedOut) {
         Remove-Item $stdoutPath, $stderrPath -Force
         throw "Timed out after 60 seconds: $Binary $argumentLine"
     }
@@ -166,7 +194,7 @@ function Invoke-ReadOnlyCase([string] $Binary, [string[]] $Arguments) {
     $stderr = [Convert]::ToBase64String([IO.File]::ReadAllBytes($stderrPath))
     Remove-Item $stdoutPath, $stderrPath
     return [pscustomobject]@{
-        ExitCode = $process.ExitCode
+        ExitCode = $exitCode
         Stdout = $stdout
         Stderr = $stderr
     }
@@ -200,3 +228,4 @@ foreach ($case in $cases) {
 if ($differences -gt 0) {
     throw "$differences reference comparison(s) differed"
 }
+"Matched $($cases.Count) of $($cases.Count) safe reference comparisons."

@@ -40,7 +40,7 @@ interface and Windows service behavior. GUI workflows are explicitly excluded.
 | Hooks | `AppEvents <event>/<action> <command>` for service/app start, stop, rotate lifecycle and pre/post phases; hook output-handle behavior and all `NSSM_*` ABI variables | Event-order integration assertions for normal start, restart, stop, rotation, failures, and cancellation; assert the full environment ABI on real Start, Exit, Stop and Rotate hooks |
 | Discovery/reporting | `list` and `list all`; `processes <name>`; `dump <name>` and `dump <name> <newname>` | Golden output tests, quoting/escaping round-trip, process tree correctness, native-service filtering |
 | Windows process launch | Correct Windows quoting, Unicode paths/args, environment expansion, priority, CPU affinity, console/window behavior | Launch fixture with argv/environment echo, Unicode and special-character cases, priority/affinity inspection |
-| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; events 1001, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1020, 1021, 1034, 1035, 1040, 1041, 1052, 1053, 1066, 1067, 1068, 1069, 1070, 1072, 1077, 1078 and 1079 are verified |
+| Event logging/errors | Windows Event Log diagnostics and correct system error reporting | Capture expected events/error codes for service start/stop and invalid SCM/registry operations; events 1001, 1005, 1006, 1008, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1019, 1020, 1021, 1028, 1032, 1033, 1034, 1035, 1038, 1039, 1040, 1041, 1045, 1046, 1047, 1048, 1052, 1053, 1060, 1064, 1065, 1066, 1067, 1068, 1069, 1070, 1072, 1073, 1077, 1078 and 1079 are verified |
 
 ### Complete setting-name inventory
 
@@ -109,6 +109,23 @@ does not satisfy the command-by-command release gate yet.
 
 ## Current status
 
+Local Windows verification on 2026-10-16 used Windows 11 build 26200 from a
+non-administrator session. The library's 17 tests, all 13 CLI compatibility
+tests, all 6 CLI process tests and 43 Windows backend unit tests passed. One
+backend case that installs a real service was filtered; an unfiltered run
+reached it and SCM returned access denied. Event tests reused the existing NSSM
+event source; failure cases for events 1017, 1019, 1028, 1032, 1033, 1038,
+1039, 1060, 1064, 1065 and 1073 passed against the Windows Application log. A direct non-administrator
+`install` invocation printed the administrator-required CLI diagnostic and returned 100
+without launching UAC. The SCM integration suite still requires an elevated
+Windows session and has not been run in full; four read-only/error-path cases
+from it did pass against the live SCM. The pinned NSSM read-only comparison
+matched all 106 safe invocations with exact exit codes and raw stdout/stderr on
+2026-10-16;
+the UAC-triggering missing-service `remove` case is intentionally excluded. The
+Windows x64 release build also succeeded, and its `--version`, `help`, and
+non-administrator `install` behaviors were checked on the host.
+
 Command parsing, managed settings, AppEnvironment/AppEnvironmentExtra composition,
 AppExit rules, priority/affinity, restart delay/throttle, SCM lifecycle, install,
 remove, service listing, process launch with configured stdin/stdout/stderr files,
@@ -127,16 +144,23 @@ configuration dump are implemented. The Windows integration suite checks real
 SCM install/start/stop/remove; process-tree reporting and descendant termination;
 Start/Pre abort behavior; hook output redirection and event ordering; restart,
 ignore and exit policies; environment composition; all three child standard
-streams; and online/on-demand log rotation. It passes locally on Windows and in
-GitHub Actions. CI runs the Windows unit/CLI suite and the full SCM integration
+streams; and online/on-demand log rotation. The latest successful full Windows
+SCM CI run is [run 38807996448](https://github.com/lihongjie0209/nssm-rs/actions/runs/38807996448)
+for commit `0264806`; the current worktree adds further Windows tests that still
+need a full run. CI runs the Windows unit/CLI suite and full SCM integration
 suite as separate named steps. The standalone SCM smoke test also verifies
 configuration readback, running state, wrapped process reporting, stop, removal
 and service disappearance. A dedicated Windows settings integration test now
 round-trips and resets all 28 managed DWORD settings against the real service
 registry, including priority name normalization and each setting's default.
-Non-administrator `install` and `remove` now request UAC elevation while
-preserving command arguments; Windows unit coverage checks safe reconstruction,
-and the full local elevated SCM integration suite passed with this change.
+The stream logger now detects UTF-16LE output, writes a BOM to an empty log,
+and encodes timestamps in the stream's character width; pure tests cover line
+prefixing across chunks and Windows integration checks the resulting BOM and
+decoded timestamp. This new Windows assertion still needs execution on Windows.
+Service management commands do not launch UAC or any other GUI prompt. Commands
+that require administrator access print a CLI diagnostic and exit; rerun them
+from an elevated terminal. Windows unit coverage verifies which operations need
+administrator access without launching a process.
 Install now persists the application directory and `AppExit=Restart` defaults,
 matching NSSM before the first service start. `dump` emits shell-safe commands,
 symbolic priority values and native default metadata; the Windows lifecycle
@@ -161,8 +185,8 @@ both the default append behavior and explicit `CREATE_ALWAYS` truncation while
 checking stdin, stdout and stderr contents. When stdout and stderr resolve to
 the same Windows path, nssm-rs now duplicates the stdout handle, uses stdout's
 open settings for both streams, and preserves NSSM's stdout logger / direct
-stderr handle behavior for timestamping and online rotation; the local elevated
-Windows SCM suite verified the stdout-wins behavior. The Windows suite also verifies that SCM stop reaches responding children through
+stderr handle behavior for timestamping and online rotation; the Windows SCM
+test suite verifies the stdout-wins behavior. The Windows suite also verifies that SCM stop reaches responding children through
 CTRL+C, WM_CLOSE and WM_QUIT before termination fallback; hook tests capture all
 documented `NSSM_*` ABI variables for Start/Pre, Exit/Post, Stop/Pre and
 Rotate/Pre/Post and verify the configured working directory. Supported Power
@@ -191,8 +215,9 @@ service and reads back its application, arguments, and service type. Remaining
 acceptance scope includes system-level Power event delivery, broader error-path
 coverage, and command-by-command parity against the pinned reference. Verified
 event-log coverage includes events 1001, 1002, 1006, 1008, 1010, 1011, 1012,
-1013, 1014, 1015, 1016, 1018, 1020, 1021, 1023, 1027, 1034, 1035, 1036, 1040,
-1041, 1056, 1071, 1072 and 1077; events 1018, 1036, 1056 and 1071 cover invalid
+1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1023, 1027, 1028,
+1032, 1033, 1034, 1035, 1036, 1039, 1040, 1041, 1045, 1046, 1047, 1048,
+1056, 1060, 1064, 1071, 1072, 1073 and 1077; events 1018, 1036, 1056 and 1071 cover invalid
 numeric registry queries and default fallbacks. Missing-service exit status 3 is now
 covered for status, start, stop,
 restart, pause, continue, rotate, get, set, reset and confirmed remove. A real
@@ -200,6 +225,52 @@ SCM stop during the child-free restart-throttle wait verifies event 1012 and
 its service/application insertion values; stopping a running child verifies
 event 1011. The default Suicide/zero-exit integration asserts that event 1016
 retains the original Suicide action and event 1021 explains the graceful fallback.
+An inventory comparison against pinned upstream `messages.mc` found event 1003
+without a matching nssm-rs diagnostic; its uses are allocation failures that
+Rust's infallible allocation APIs generally abort on. Events 1059 and 1061 are
+defined in the message catalog but are not referenced by the pinned upstream
+source.
+Event 1009 is not applicable: NSSM registers a `RegisterWaitForSingleObject`
+callback, while nssm-rs monitors child exits with `Child::try_wait()` in its
+service loop, so it has no corresponding registration failure.
+Events 1022, 1037, 1054, 1055 and 1062 are also not applicable to the current
+implementation: environment expansion is performed in Rust, delay waits use
+`thread::sleep`, Win32 APIs are linked directly instead of resolved with
+`LoadLibrary`/`GetProcAddress`, and child environments are passed at process
+creation instead of being set in the service host.
+Event 1039 is now covered: a wrong registry type for `AppEnvironment` or
+`AppEnvironmentExtra` emits the upstream warning and ignores that value instead
+of aborting service startup; a Windows event test verifies this behavior.
+Event 1038 now identifies malformed `REG_MULTI_SZ` environment entries and names
+the offending `AppEnvironment` or `AppEnvironmentExtra` value before startup is
+rejected. A Windows backend test injects a malformed extra entry and verifies
+the event's service, application and registry-value fields. A separate SCM
+integration test verifies that this configuration stops actual service startup;
+that lifecycle case still needs an elevated local run.
+Event 1065 now follows NSSM's delayed-start fallback: a failed optional
+`ChangeServiceConfig2W()` update leaves the service at ordinary automatic start,
+logs the error except for unsupported-level errors, and keeps the setting
+operation successful. Windows unit coverage checks the fallback error policy,
+and injects a failure at the delayed-start configuration boundary to verify
+event 1065 and successful fallback; the SCM integration round-trips delayed
+and ordinary automatic start.
+Event 1064 now records a service-description update failure while preserving
+the command failure result. A Windows API failure injection verifies the event
+and failure result against the Application log.
+Event 1073 now reports explicit Windows log-pipe creation failure, then
+continues with the log file as the child's direct output so the application can
+still start. Windows tests verify successful inherited-pipe delivery, event
+1073, and the direct-file fallback.
+Event 1060 now reports logger-thread creation failure and falls back to direct
+file output. A Windows failure-injection test verifies event 1060 and that the
+child's output reaches the log file.
+Events 1017 (required registry-key open failure), 1019 (`RegSetValueExW()` failure),
+1028 (`TerminateProcess()` failure),
+1032 (thread snapshot failure) and 1033 (thread enumeration failure) now have
+deterministic Windows failure tests and passed locally against the Windows
+Application log. A separate Windows API mock test covers console events
+1045-1048, including the benign `ERROR_INVALID_HANDLE` and `ERROR_GEN_FAILURE`
+AttachConsole results that NSSM suppresses.
 Do not call this a complete NSSM replacement or publish a stable release until
 each acceptance row has evidence.
 
@@ -207,8 +278,9 @@ The service-main unit test invokes `RegisterServiceCtrlHandlerExW` outside an
 SCM dispatcher, producing the real Windows registration failure and verifying
 event 1005 in the Application log. The read-only Windows reference sweep checks
 all 39 managed setting names against a native service and compares exact
-stdout/stderr bytes and exit status. The latest complete sweep matched all 100
-safe invocations against pinned NSSM v2.24.1 in [GitHub Actions run
+stdout/stderr bytes and exit status. The latest local sweep matched all 106
+safe invocations against pinned NSSM v2.24.1 on 2026-10-16. An earlier 100-case
+sweep passed in [GitHub Actions run
 38787362624](https://github.com/lihongjie0209/nssm-rs/actions/runs/38787362624).
 It verifies all nine NSSM version switch forms by success status and output
 stream contract, plus missing-subparameter precedence for `AppExit` and
@@ -225,22 +297,24 @@ pinned executable. This verified NSSM's
 already-running start failure and already-stopped stop success behavior, as
 well as lifecycle success-message text and line endings.
 
-The service host now distinguishes an initial child launch failure from a
-failed launch after an application Restart action. The latter reports warning
-event 1007 with the executable and service name, then waits 30 seconds and
-applies the normal restart throttle before retrying while remaining responsive
-to SCM stop. A Windows SCM test forces this path by making a disposable
-executable unavailable during the configured restart delay. Standard-stream
-creation failure now reports event 1049 with the file path and system error,
-then events 1051 and 1006 with the output setup failure and service-specific
-exit code. A Windows SCM test configures output under a missing directory and
-checks all three event records. Hook lookup and process creation failures now
+When a child cannot be created after an application Restart action, upstream
+logs error event 1010 with the service, executable and OS error, then event
+1012 for the already-stopped process, event 1006 with service-specific exit
+code 3, and warning event 1007. It reports
+`SERVICE_STOPPED` during the 30-second wait, then tries the application again.
+nssm-rs now follows this behavior; its former retry-state expectation was
+incorrect. The paired Windows reference scenario checks all four events, the
+stopped interval, and successful recovery, and awaits a green run.
+Standard-stream creation failure now reports event 1049 with the file path and system error,
+then event 1051, already-stopped event 1012, and start failure 1006 with the
+output setup failure and service-specific exit code. Windows SCM tests check
+these event records. Hook lookup and process creation failures now
 report events 1081 and 1080 respectively; a Windows SCM scenario verifies a
 missing Start/Pre executable does not abort service startup. A second Windows
 SCM scenario denies SYSTEM read access to the isolated Start hook registry key
-and verifies event 1081 without aborting startup. The elevated local Windows
-run on 2026-10-15 passed the 1005, 1007, 1049/1051/1006, 1080/1081, 1029/1030,
-1063, and identical stdout/stderr scenarios. A deterministic Windows API failure
+and verifies event 1081 without aborting startup. The last successful full
+Windows SCM CI run on commit `0264806` passed the 1005, 1049/1051/1006,
+1080/1081, 1029/1030, 1063, and identical stdout/stderr scenarios. A deterministic Windows API failure
 injection now runs the process-tree reporting path and verifies that a new
 Application log event 1024 is written and its Windows error is returned. A
 second injection forces `Process32FirstW` to fail and verifies event 1025 in the
@@ -251,6 +325,5 @@ the shared error handler and verifies event 1050.
 
 Missing `AppParameters` now logs warning 1029 and uses an empty argument list.
 Missing or empty `AppDirectory` logs warning 1030 and falls back to the
-application's parent directory, then the Windows directory. The local elevated
-Windows SCM run passed the test for event insertion values, fallback directory,
-and the child lifecycle.
+application's parent directory, then the Windows directory. The Windows SCM
+test checks event insertion values, the fallback directory, and child lifecycle.

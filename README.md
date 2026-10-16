@@ -13,6 +13,14 @@ cargo test
 
 The binary is named `nssm-rs.exe`. On non-Windows hosts, `help` and `version` work; Windows SCM operations require Windows.
 
+On Windows, run the complete SCM integration suite from an elevated PowerShell or Terminal:
+
+```powershell
+cargo test --test windows_scm_smoke --test windows_service -- --nocapture --test-threads=1
+```
+
+The test run does not request UAC elevation or open a GUI prompt. Open an elevated terminal yourself before running it. Service management commands likewise print a CLI diagnostic and exit when administrator access is missing.
+
 ## Intended CLI compatibility
 
 The target command set is `install`, `remove`, `start`, `stop`, `restart`, `pause`, `continue`, `status`, `statuscode`, `get`, `set`, `reset`/`unset`, `rotate`, `list`, `dump`, and `processes`, including NSSM-compatible service configuration and application supervision. GUI workflows are out of scope.

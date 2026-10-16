@@ -3,14 +3,19 @@ use nssm_rs::{
     compose_child_environment, edit_dependencies, edit_environment, expand_environment_value,
     format_cpu_affinity_mask, log_rotation_due, managed_setting, normalize_cpu_affinity,
     normalize_exit_action, parse_cpu_affinity, quote_windows_arg, rotated_log_path,
-    split_windows_args,
+    split_windows_args, timestamp_stream_chunk,
 };
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
-    os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle, process::CommandExt},
+    os::windows::{
+        ffi::OsStrExt,
+        fs::OpenOptionsExt,
+        io::{AsRawHandle, FromRawHandle, RawHandle},
+        process::CommandExt,
+    },
     path::Path,
     process::{Child, Command as ProcessCommand, Stdio},
     ptr,
@@ -23,12 +28,15 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, ERROR_NO_MORE_FILES, ERROR_NO_MORE_ITEMS, FILETIME, HANDLE, HWND,
-        INVALID_HANDLE_VALUE, LPARAM, NO_ERROR, WAIT_OBJECT_0, WPARAM,
+        CloseHandle, ERROR_INVALID_LEVEL, ERROR_NO_MORE_FILES, ERROR_NO_MORE_ITEMS, FILETIME,
+        GetLastError, HANDLE, HANDLE_FLAG_INHERIT, HWND, INVALID_HANDLE_VALUE, LPARAM, NO_ERROR,
+        SetHandleInformation, WPARAM,
     },
     Globalization::{
-        CSTR_EQUAL, CompareStringOrdinal, GetUserDefaultUILanguage, WideCharToMultiByte,
+        CSTR_EQUAL, CompareStringOrdinal, GetUserDefaultUILanguage, IsTextUnicode,
+        WideCharToMultiByte,
     },
+    Security::SECURITY_ATTRIBUTES,
     System::Console::{
         AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleMode,
         GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCtrlHandler,
@@ -41,16 +49,17 @@ use windows_sys::Win32::{
             RegisterEventSourceW, ReportEventW,
         },
         JobObjects::*,
+        Pipes::CreatePipe,
         Registry::*,
         Services::*,
         SystemInformation::{GetSystemTimeAsFileTime, GetWindowsDirectoryW},
         Threading::*,
     },
-    UI::Shell::{IsUserAnAdmin, SHELLEXECUTEINFOW, ShellExecuteExW},
+    UI::Shell::IsUserAnAdmin,
     UI::WindowsAndMessaging::{
         ENDSESSION_CLOSEAPP, ENDSESSION_CRITICAL, ENDSESSION_LOGOFF, EnumThreadWindows,
         GetWindowThreadProcessId, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC, PostMessageW,
-        PostThreadMessageW, SW_SHOW, WM_CLOSE, WM_ENDSESSION, WM_QUIT,
+        PostThreadMessageW, WM_CLOSE, WM_ENDSESSION, WM_QUIT,
     },
 };
 
@@ -67,9 +76,18 @@ const EVENT_START_SERVICE_FAILED: u32 = 0xc000_03ee;
 const EVENT_RESTART_SERVICE_FAILED: u32 = 0x8000_03ef;
 const EVENT_STARTED_SERVICE: u32 = 0x4000_03f0;
 const EVENT_CREATEPROCESS_FAILED: u32 = 0xc000_03f2;
+const EVENT_CREATEPROCESS_FAILED_INVALID_ENVIRONMENT: u32 = 0xc000_040e;
+const EVENT_SERVICE_CONFIG_DELAYED_AUTO_START_INFO_FAILED: u32 = 0x4000_0429;
+const EVENT_SERVICE_CONFIG_DESCRIPTION_FAILED: u32 = 0x4000_0428;
+const EVENT_CREATEPIPE_FAILED: u32 = 0xc000_0431;
+const EVENT_CREATETHREAD_FAILED: u32 = 0xc000_0424;
 const EVENT_CREATEFILE_FAILED: u32 = 0xc000_0419;
 const EVENT_DUPLICATEHANDLE_FAILED: u32 = 0xc000_041a;
 const EVENT_GET_OUTPUT_HANDLES_FAILED: u32 = 0xc000_041b;
+const EVENT_TERMINATEPROCESS_FAILED: u32 = 0xc000_0404;
+const EVENT_READFILE_FAILED: u32 = 0xc000_0432;
+const EVENT_WRITEFILE_FAILED: u32 = 0xc000_0433;
+const EVENT_BOM_WRITE_FAILED: u32 = 0x8000_0434;
 const EVENT_TERMINATEPROCESS: u32 = 0x4000_03f3;
 const EVENT_PROCESS_ALREADY_STOPPED: u32 = 0x4000_03f4;
 const EVENT_ENDED_SERVICE: u32 = 0x4000_03f5;
@@ -94,6 +112,15 @@ const EVENT_REGISTER_HANDLER_FAILED: u32 = 0xc000_03ed;
 const EVENT_PROCESS_SNAPSHOT_FAILED: u32 = 0xc000_0400;
 const EVENT_PROCESS_ENUMERATE_FAILED: u32 = 0xc000_0401;
 const EVENT_OPEN_PROCESS_FAILED: u32 = 0xc000_0402;
+const EVENT_THREAD_SNAPSHOT_FAILED: u32 = 0xc000_0408;
+const EVENT_THREAD_ENUMERATE_FAILED: u32 = 0xc000_0409;
+const EVENT_SETVALUE_FAILED: u32 = 0xc000_03fb;
+const EVENT_OPENKEY_FAILED: u32 = 0xc000_03f9;
+const EVENT_INVALID_ENVIRONMENT_STRING_TYPE: u32 = 0x8000_040f;
+const EVENT_ATTACH_CONSOLE_FAILED: u32 = 0xc000_0415;
+const EVENT_SET_CONSOLE_CTRL_HANDLER_FAILED: u32 = 0xc000_0416;
+const EVENT_GENERATE_CONSOLE_CTRL_EVENT_FAILED: u32 = 0xc000_0417;
+const EVENT_FREE_CONSOLE_FAILED: u32 = 0x8000_0418;
 const EVENT_GET_PROCESS_TIMES_FAILED: u32 = 0xc000_0414;
 const EVENT_ROTATE_FILE_FAILED: u32 = 0xc000_0427;
 const EVENT_SERVICE_CONTROL_HANDLED: u32 = 0x4000_0410;
@@ -269,11 +296,17 @@ struct ManagedChild {
 }
 
 struct LogDestination {
+    service: String,
     path: String,
     sharing: u32,
     disposition: AtomicU32,
     attributes: u32,
     file: Mutex<Option<File>>,
+}
+
+struct LogPipe {
+    reader: File,
+    writer: File,
 }
 
 #[derive(Debug)]
@@ -307,6 +340,7 @@ impl LogDestination {
         let disposition = read_reg_dword(service, &format!("{setting}CreationDisposition"), 4)?;
         let attributes = read_reg_dword(service, &format!("{setting}FlagsAndAttributes"), 128)?;
         Ok(Arc::new(Self {
+            service: service.to_owned(),
             path,
             sharing,
             disposition: AtomicU32::new(disposition),
@@ -315,11 +349,21 @@ impl LogDestination {
         }))
     }
 
-    fn write_all(&self, bytes: &[u8]) -> io::Result<()> {
+    fn write_stream_chunk(&self, bytes: &[u8], char_width: usize) -> io::Result<()> {
         let mut file = self.file.lock().map_err(|_| io::ErrorKind::Other)?;
-        file.as_mut()
-            .ok_or(io::ErrorKind::BrokenPipe)?
-            .write_all(bytes)
+        let file = file.as_mut().ok_or(io::ErrorKind::BrokenPipe)?;
+        if char_width == 2
+            && file.metadata().map_or(true, |metadata| metadata.len() == 0)
+            && let Err(error) = file.write_all(&[0xff, 0xfe])
+        {
+            let message = windows_error_message(&error);
+            report_event(
+                windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+                EVENT_BOM_WRITE_FAILED,
+                &[&self.service, &self.path, &message],
+            );
+        }
+        file.write_all(bytes)
     }
 
     fn flush(&self) -> io::Result<()> {
@@ -466,6 +510,104 @@ impl LogDestination {
         file.seek(SeekFrom::End(0))?;
         Ok(file)
     }
+
+    fn take_file_for_child_fallback(&self) -> io::Result<File> {
+        self.file
+            .lock()
+            .map_err(|_| io::ErrorKind::Other)?
+            .take()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))
+    }
+}
+
+fn create_log_pipe() -> io::Result<LogPipe> {
+    #[cfg(test)]
+    if FAIL_NEXT_LOG_PIPE.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(5) };
+        return Err(io::Error::last_os_error());
+    }
+
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        bInheritHandle: 1,
+        ..Default::default()
+    };
+    let mut read_handle: HANDLE = ptr::null_mut();
+    let mut write_handle: HANDLE = ptr::null_mut();
+    if unsafe { CreatePipe(&mut read_handle, &mut write_handle, &attributes, 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { SetHandleInformation(read_handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            CloseHandle(read_handle);
+            CloseHandle(write_handle);
+        }
+        return Err(error);
+    }
+    Ok(unsafe {
+        LogPipe {
+            reader: File::from_raw_handle(read_handle as RawHandle),
+            writer: File::from_raw_handle(write_handle as RawHandle),
+        }
+    })
+}
+
+fn report_log_pipe_failure(service: &str, path: &str, error: &io::Error) {
+    report_event(
+        EVENTLOG_ERROR_TYPE,
+        EVENT_CREATEPIPE_FAILED,
+        &[service, path, &windows_error_message(error)],
+    );
+}
+
+fn spawn_logger_thread<F>(name: &str, task: F) -> io::Result<thread::JoinHandle<io::Result<()>>>
+where
+    F: FnOnce() -> io::Result<()> + Send + 'static,
+{
+    #[cfg(test)]
+    if FAIL_NEXT_LOG_THREAD.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(8) };
+        return Err(io::Error::last_os_error());
+    }
+    thread::Builder::new().name(name.to_owned()).spawn(task)
+}
+
+fn fallback_after_logger_thread_failure(
+    destination: &mut Option<Arc<LogDestination>>,
+    error: &io::Error,
+) -> io::Result<File> {
+    let error_text = windows_error_message(error);
+    report_event(
+        EVENTLOG_ERROR_TYPE,
+        EVENT_CREATETHREAD_FAILED,
+        &[&error_text],
+    );
+    let file = destination
+        .as_ref()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?
+        .take_file_for_child_fallback()?;
+    *destination = None;
+    Ok(file)
+}
+
+fn configured_output_stdio(
+    service: &str,
+    destination: &mut Option<Arc<LogDestination>>,
+    file: Option<File>,
+) -> io::Result<(Stdio, Option<File>)> {
+    let Some(log_destination) = destination.as_ref() else {
+        return Ok((file.map(Stdio::from).unwrap_or_else(Stdio::null), None));
+    };
+    match create_log_pipe() {
+        Ok(pipe) => Ok((Stdio::from(pipe.writer), Some(pipe.reader))),
+        Err(error) => {
+            report_log_pipe_failure(service, &log_destination.path, &error);
+            let file = log_destination.take_file_for_child_fallback()?;
+            *destination = None;
+            Ok((Stdio::from(file), None))
+        }
+    }
 }
 
 struct RegKey(HKEY);
@@ -511,6 +653,12 @@ fn open_registry_key(
     if code == 0 {
         Ok(RegKey(key))
     } else {
+        let error = windows_error_message(&io::Error::from_raw_os_error(code as i32));
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_OPENKEY_FAILED,
+            &[&full_path, &error],
+        );
         Err(registry_error(code))
     }
 }
@@ -532,7 +680,16 @@ fn open_registry_key_optional(
     match unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, access, &mut key) } {
         0 => Ok(Some(RegKey(key))),
         2 => Ok(None),
-        code => Err(registry_error(code)),
+        code => {
+            let registry_path = format!("{SERVICE_KEY_PREFIX}{service}\\Parameters{suffix}");
+            let error = windows_error_message(&io::Error::from_raw_os_error(code as i32));
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_OPENKEY_FAILED,
+                &[&registry_path, &error],
+            );
+            Err(registry_error(code))
+        }
     }
 }
 
@@ -595,19 +752,39 @@ fn read_multi_parameter(service: &str, name: &str) -> Result<Option<Vec<String>>
     let Some((kind, bytes)) = read_raw_value(key.0, Some(name))? else {
         return Ok(None);
     };
+    decode_multi_parameter(service, name, kind, &bytes)
+}
+
+fn decode_multi_parameter(
+    service: &str,
+    name: &str,
+    kind: u32,
+    bytes: &[u8],
+) -> Result<Option<Vec<String>>, String> {
     if kind != REG_MULTI_SZ {
-        return Err(format!("service setting {name} is not REG_MULTI_SZ"));
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+            EVENT_INVALID_ENVIRONMENT_STRING_TYPE,
+            &[name, service],
+        );
+        return Ok(None);
     }
-    Ok(Some(decode_multi_string(&bytes)?))
+    Ok(Some(decode_multi_string(bytes)?))
 }
 
 fn write_raw_value(key: HKEY, name: Option<&str>, kind: u32, data: &[u8]) -> Result<(), String> {
-    let name = name.map(|s| wide(OsStr::new(s)));
-    let name_ptr = name.as_ref().map_or(ptr::null(), |s| s.as_ptr());
+    let name_wide = name.map(|s| wide(OsStr::new(s)));
+    let name_ptr = name_wide.as_ref().map_or(ptr::null(), |s| s.as_ptr());
     let code = unsafe { RegSetValueExW(key, name_ptr, 0, kind, data.as_ptr(), data.len() as u32) };
     if code == 0 {
         Ok(())
     } else {
+        let error = windows_error_message(&io::Error::from_raw_os_error(code as i32));
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_SETVALUE_FAILED,
+            &[name.unwrap_or(""), &error],
+        );
         Err(registry_error(code))
     }
 }
@@ -1106,6 +1283,79 @@ fn set_setting(service: &str, parameter: &str, values: &[String]) -> Result<(), 
     result
 }
 
+fn reportable_delayed_start_error(error: io::Error) -> Option<io::Error> {
+    (error.raw_os_error() != Some(ERROR_INVALID_LEVEL as i32)).then_some(error)
+}
+
+fn report_delayed_start_error(service: &str, error: io::Error) {
+    if let Some(error) = reportable_delayed_start_error(error) {
+        let error = windows_error_message(&error);
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+            EVENT_SERVICE_CONFIG_DELAYED_AUTO_START_INFO_FAILED,
+            &[service, &error],
+        );
+    }
+}
+
+fn change_delayed_start_info(handle: SC_HANDLE, info: &SERVICE_DELAYED_AUTO_START_INFO) -> bool {
+    #[cfg(test)]
+    if FAIL_NEXT_DELAYED_START_CONFIG.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(5) };
+        return false;
+    }
+    unsafe {
+        ChangeServiceConfig2W(
+            handle,
+            SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+            (info as *const SERVICE_DELAYED_AUTO_START_INFO).cast(),
+        ) != 0
+    }
+}
+
+fn configure_delayed_start(service: &str, handle: SC_HANDLE, delayed: bool) -> bool {
+    let info = SERVICE_DELAYED_AUTO_START_INFO {
+        fDelayedAutostart: i32::from(delayed),
+    };
+    if !change_delayed_start_info(handle, &info) {
+        report_delayed_start_error(service, io::Error::last_os_error());
+    }
+    // The base service type is already automatic. Delayed start is optional.
+    true
+}
+
+fn set_service_description(service: &str, handle: SC_HANDLE, value: &str) -> bool {
+    let mut description = wide(OsStr::new(value));
+    let info = SERVICE_DESCRIPTIONW {
+        lpDescription: description.as_mut_ptr(),
+    };
+    let changed = change_service_description(handle, &info);
+    if !changed {
+        let error = windows_error_message(&io::Error::last_os_error());
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+            EVENT_SERVICE_CONFIG_DESCRIPTION_FAILED,
+            &[service, &error],
+        );
+    }
+    changed
+}
+
+fn change_service_description(handle: SC_HANDLE, info: &SERVICE_DESCRIPTIONW) -> bool {
+    #[cfg(test)]
+    if FAIL_NEXT_DESCRIPTION_CONFIG.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(5) };
+        return false;
+    }
+    unsafe {
+        ChangeServiceConfig2W(
+            handle,
+            SERVICE_CONFIG_DESCRIPTION,
+            (info as *const SERVICE_DESCRIPTIONW).cast(),
+        ) != 0
+    }
+}
+
 fn set_setting_inner(service: &str, parameter: &str, values: &[String]) -> Result<(), String> {
     let Some(spec) = managed_setting(parameter) else {
         return set_native_setting(service, parameter, values);
@@ -1544,19 +1794,7 @@ fn set_native_setting(service: &str, parameter: &str, values: &[String]) -> Resu
                         )
                     }) != 0
                 }
-                "description" => {
-                    let mut description = wide(OsStr::new(&value));
-                    let info = SERVICE_DESCRIPTIONW {
-                        lpDescription: description.as_mut_ptr(),
-                    };
-                    (unsafe {
-                        ChangeServiceConfig2W(
-                            handle.0,
-                            SERVICE_CONFIG_DESCRIPTION,
-                            (&info as *const SERVICE_DESCRIPTIONW).cast(),
-                        )
-                    }) != 0
-                }
+                "description" => set_service_description(service, handle.0, &value),
                 "displayname" => {
                     let display = if values.is_empty() {
                         service.to_owned()
@@ -1667,19 +1905,11 @@ fn set_native_setting(service: &str, parameter: &str, values: &[String]) -> Resu
                     if !changed {
                         false
                     } else {
-                        let delayed = SERVICE_DELAYED_AUTO_START_INFO {
-                            fDelayedAutostart: i32::from(
-                                value.eq_ignore_ascii_case("SERVICE_DELAYED_AUTO_START"),
-                            ),
-                        };
-                        (unsafe {
-                            ChangeServiceConfig2W(
-                                handle.0,
-                                SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
-                                (&delayed as *const SERVICE_DELAYED_AUTO_START_INFO).cast(),
-                            )
-                        }) != 0
-                            || io::Error::last_os_error().raw_os_error() == Some(124)
+                        configure_delayed_start(
+                            service,
+                            handle.0,
+                            value.eq_ignore_ascii_case("SERVICE_DELAYED_AUTO_START"),
+                        )
                     }
                 }
                 "type" => {
@@ -2453,28 +2683,13 @@ fn wait_for_restart_delay(
     }
 }
 
-fn retry_failed_restart_launch(
-    service_name: &str,
-    app: &str,
-    throttle_ms: u32,
-    restart_delay_ms: u32,
-    throttle: &mut nssm_rs::RestartThrottle,
-) {
+fn wait_before_failed_restart_retry(service_name: &str, app: &str) {
     report_event(
         windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
         EVENT_RESTART_SERVICE_FAILED,
         &[app, service_name],
     );
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !STOP_REQUESTED.load(Ordering::SeqCst) && Instant::now() < deadline {
-        thread::sleep(
-            Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())),
-        );
-    }
-    if !STOP_REQUESTED.load(Ordering::SeqCst) {
-        let delay = throttle.after_exit();
-        wait_for_restart_delay(service_name, delay, throttle_ms, restart_delay_ms, throttle);
-    }
+    thread::sleep(Duration::from_secs(30));
 }
 
 struct ScHandle(SC_HANDLE);
@@ -3040,7 +3255,33 @@ static FAIL_OPEN_PROCESS_PID: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static FAIL_NEXT_PROCESS_TIMES: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
+static FAIL_NEXT_TERMINATE_PROCESS: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_THREAD_SNAPSHOT: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static MOCK_CONSOLE_API: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_ATTACH_CONSOLE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_SET_CONSOLE_HANDLER: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_GENERATE_CTRL_EVENT: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_FREE_CONSOLE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_THREAD_FIRST: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_THREAD_NEXT: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
 static FAIL_NEXT_STDIO_DUPLICATE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_LOG_PIPE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_LOG_THREAD: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_DESCRIPTION_CONFIG: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_DELAYED_START_CONFIG: AtomicBool = AtomicBool::new(false);
 
 fn process_snapshot() -> io::Result<HANDLE> {
     #[cfg(test)]
@@ -3090,6 +3331,29 @@ fn get_process_times(
         return 0;
     }
     unsafe { GetProcessTimes(process, creation, exit, kernel, user) }
+}
+
+fn terminate_process_for_stop(process: HANDLE, pid: u32, service: &str) -> bool {
+    #[cfg(test)]
+    let terminated = if FAIL_NEXT_TERMINATE_PROCESS.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(5) };
+        false
+    } else {
+        unsafe { TerminateProcess(process, 0) != 0 }
+    };
+    #[cfg(not(test))]
+    let terminated = unsafe { TerminateProcess(process, 0) != 0 };
+
+    if !terminated {
+        let pid = pid.to_string();
+        let message = windows_error_message(&io::Error::last_os_error());
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_TERMINATEPROCESS_FAILED,
+            &[&pid, service, &message],
+        );
+    }
+    terminated
 }
 
 fn filetime_value(time: FILETIME) -> u64 {
@@ -3823,6 +4087,11 @@ fn report_stdio_setup_failure(service: &str, app: &str, error: &StdioFileError) 
         &[service],
     );
     report_event(
+        windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+        EVENT_PROCESS_ALREADY_STOPPED,
+        &[service, app],
+    );
+    report_event(
         EVENTLOG_ERROR_TYPE,
         EVENT_START_SERVICE_FAILED,
         &[app, service, "4"],
@@ -3945,20 +4214,52 @@ fn log_stream<R: Read>(
 ) -> io::Result<()> {
     let mut buffer = [0; 4096];
     let mut line_start = true;
+    let mut char_width = None;
     loop {
-        let count = input.read(&mut buffer)?;
+        let count = match input.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) => {
+                let message = windows_error_message(&error);
+                report_event(
+                    EVENTLOG_ERROR_TYPE,
+                    EVENT_READFILE_FAILED,
+                    &[&destination.service, &destination.path, &message],
+                );
+                return Err(error);
+            }
+        };
         if count == 0 {
             return destination.flush();
         }
-        let mut chunk = Vec::with_capacity(count + count / 40 * 25);
-        for byte in &buffer[..count] {
-            if timestamp && line_start {
-                chunk.extend_from_slice(utc_timestamp_prefix().as_bytes());
-            }
-            chunk.push(*byte);
-            line_start = *byte == b'\n';
+        let char_width = *char_width.get_or_insert_with(|| {
+            let mut result = 0;
+            let detected = unsafe {
+                IsTextUnicode(
+                    buffer.as_ptr().cast(),
+                    count.min(i32::MAX as usize) as i32,
+                    &mut result,
+                ) != 0
+            };
+            if detected { 2 } else { 1 }
+        });
+        let chunk = if timestamp {
+            let prefix = utc_timestamp_prefix();
+            let (chunk, next_line_start) =
+                timestamp_stream_chunk(&buffer[..count], char_width, &prefix, line_start);
+            line_start = next_line_start;
+            chunk
+        } else {
+            buffer[..count].to_vec()
+        };
+        if let Err(error) = destination.write_stream_chunk(&chunk, char_width) {
+            let message = windows_error_message(&error);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_WRITEFILE_FAILED,
+                &[&destination.service, &destination.path, &message],
+            );
+            return Err(error);
         }
-        destination.write_all(&chunk)?;
     }
 }
 
@@ -4050,22 +4351,111 @@ unsafe extern "system" fn post_close_to_process_window(hwnd: HWND, target_pid: L
     1
 }
 
-fn send_console_ctrl_c(process_id: u32) {
-    if unsafe { AttachConsole(process_id) } == 0 {
+fn attach_console(process_id: u32) -> bool {
+    #[cfg(test)]
+    if MOCK_CONSOLE_API.load(Ordering::SeqCst) {
+        if FAIL_NEXT_ATTACH_CONSOLE.swap(false, Ordering::SeqCst) {
+            unsafe { SetLastError(5) };
+            return false;
+        }
+        return true;
+    }
+    unsafe { AttachConsole(process_id) != 0 }
+}
+
+fn set_console_ctrl_handler(ignore: bool) -> bool {
+    #[cfg(test)]
+    if MOCK_CONSOLE_API.load(Ordering::SeqCst)
+        && FAIL_NEXT_SET_CONSOLE_HANDLER.swap(false, Ordering::SeqCst)
+    {
+        unsafe { SetLastError(5) };
+        return false;
+    }
+    unsafe { SetConsoleCtrlHandler(None, i32::from(ignore)) != 0 }
+}
+
+fn generate_console_ctrl_event() -> bool {
+    #[cfg(test)]
+    if MOCK_CONSOLE_API.load(Ordering::SeqCst)
+        && FAIL_NEXT_GENERATE_CTRL_EVENT.swap(false, Ordering::SeqCst)
+    {
+        unsafe { SetLastError(5) };
+        return false;
+    }
+    unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0 }
+}
+
+fn free_console() -> bool {
+    #[cfg(test)]
+    if MOCK_CONSOLE_API.load(Ordering::SeqCst)
+        && FAIL_NEXT_FREE_CONSOLE.swap(false, Ordering::SeqCst)
+    {
+        unsafe { SetLastError(5) };
+        return false;
+    }
+    unsafe { FreeConsole() != 0 }
+}
+
+fn send_console_ctrl_c(service: &str, process_id: u32) {
+    if !attach_console(process_id) {
+        let error = io::Error::last_os_error();
+        if !matches!(error.raw_os_error(), Some(6 | 31)) {
+            let message = windows_error_message(&error);
+            report_event(
+                EVENTLOG_ERROR_TYPE,
+                EVENT_ATTACH_CONSOLE_FAILED,
+                &[service, &message],
+            );
+        }
         return;
     }
-    unsafe {
-        SetConsoleCtrlHandler(None, 1);
-        GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
+
+    let ignored = set_console_ctrl_handler(true);
+    if !ignored {
+        let message = windows_error_message(&io::Error::last_os_error());
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_SET_CONSOLE_CTRL_HANDLER_FAILED,
+            &[service, &message],
+        );
+    } else if !generate_console_ctrl_event() {
+        let message = windows_error_message(&io::Error::last_os_error());
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_GENERATE_CONSOLE_CTRL_EVENT_FAILED,
+            &[service, &message],
+        );
+    }
+
+    #[cfg(test)]
+    let mocked = MOCK_CONSOLE_API.load(Ordering::SeqCst);
+    #[cfg(not(test))]
+    let mocked = false;
+    if ignored && !mocked {
         // Console control handlers run asynchronously. Keep the target console
         // attached briefly so the event can be dispatched before detaching.
         thread::sleep(Duration::from_millis(25));
-        FreeConsole();
-        SetConsoleCtrlHandler(None, 0);
+    }
+
+    if !free_console() {
+        let message = windows_error_message(&io::Error::last_os_error());
+        report_event(
+            windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
+            EVENT_FREE_CONSOLE_FAILED,
+            &[service, &message],
+        );
+    }
+    if ignored && !set_console_ctrl_handler(false) {
+        let message = windows_error_message(&io::Error::last_os_error());
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_SET_CONSOLE_CTRL_HANDLER_FAILED,
+            &[service, &message],
+        );
     }
 }
 
-fn send_window_close(process_id: u32) {
+fn send_window_close(_service: &str, process_id: u32) {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return;
@@ -4090,21 +4480,77 @@ fn send_window_close(process_id: u32) {
     unsafe { CloseHandle(snapshot) };
 }
 
-fn send_thread_quit(process_id: u32) {
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+fn thread_signal_snapshot() -> HANDLE {
+    #[cfg(test)]
+    if FAIL_NEXT_THREAD_SNAPSHOT.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(5) };
+        return INVALID_HANDLE_VALUE;
+    }
+    unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }
+}
+
+fn thread_signal_first(snapshot: HANDLE, entry: &mut THREADENTRY32) -> bool {
+    #[cfg(test)]
+    if FAIL_NEXT_THREAD_FIRST.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(5) };
+        return false;
+    }
+    unsafe { Thread32First(snapshot, entry) != 0 }
+}
+
+fn thread_signal_next(snapshot: HANDLE, entry: &mut THREADENTRY32) -> bool {
+    #[cfg(test)]
+    if FAIL_NEXT_THREAD_NEXT.swap(false, Ordering::SeqCst) {
+        unsafe { SetLastError(5) };
+        return false;
+    }
+    unsafe { Thread32Next(snapshot, entry) != 0 }
+}
+
+fn send_thread_quit(service: &str, process_id: u32) {
+    let snapshot = thread_signal_snapshot();
     if snapshot == INVALID_HANDLE_VALUE {
+        let error = windows_error_message(&io::Error::last_os_error());
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_THREAD_SNAPSHOT_FAILED,
+            &[service, &error],
+        );
         return;
     }
     let mut entry = THREADENTRY32 {
         dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
         ..Default::default()
     };
-    let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    let mut more = thread_signal_first(snapshot, &mut entry);
+    if !more {
+        let error = windows_error_message(&io::Error::last_os_error());
+        unsafe { CloseHandle(snapshot) };
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_THREAD_ENUMERATE_FAILED,
+            &[service, &error],
+        );
+        return;
+    }
     while more {
         if entry.th32OwnerProcessID == process_id {
             unsafe { PostThreadMessageW(entry.th32ThreadID, WM_QUIT, 0 as WPARAM, 0 as LPARAM) };
         }
-        more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        more = thread_signal_next(snapshot, &mut entry);
+        if !more {
+            let code = unsafe { GetLastError() };
+            if code != ERROR_NO_MORE_FILES {
+                let error = windows_error_message(&io::Error::from_raw_os_error(code as i32));
+                unsafe { CloseHandle(snapshot) };
+                report_event(
+                    EVENTLOG_ERROR_TYPE,
+                    EVENT_THREAD_ENUMERATE_FAILED,
+                    &[service, &error],
+                );
+                return;
+            }
+        }
     }
     unsafe { CloseHandle(snapshot) };
 }
@@ -4313,22 +4759,22 @@ fn stop_child(
                 let (setting, signal, function) = match method {
                     StopMethod::Console => (
                         "AppStopMethodConsole",
-                        send_console_ctrl_c as fn(u32),
+                        send_console_ctrl_c as fn(&str, u32),
                         "kill_console()",
                     ),
                     StopMethod::Window => (
                         "AppStopMethodWindow",
-                        send_window_close as fn(u32),
+                        send_window_close as fn(&str, u32),
                         "kill_process()",
                     ),
                     StopMethod::Threads => (
                         "AppStopMethodThreads",
-                        send_thread_quit as fn(u32),
+                        send_thread_quit as fn(&str, u32),
                         "kill_process()",
                     ),
                     StopMethod::Terminate => unreachable!(),
                 };
-                signal(pid);
+                signal(service, pid);
                 let invalid_value_event = match method {
                     StopMethod::Console => EVENT_BOGUS_KILL_CONSOLE_GRACE_PERIOD,
                     StopMethod::Window => EVENT_BOGUS_KILL_WINDOW_GRACE_PERIOD,
@@ -4350,12 +4796,14 @@ fn stop_child(
                     report_process_tree_events(service, pid, 0, false);
                     tree_events_logged = true;
                     if unsafe { TerminateJobObject(child.job as HANDLE, 0) } == 0 {
-                        unsafe {
-                            TerminateProcess(child.child.as_raw_handle() as HANDLE, 0);
-                        }
+                        terminate_process_for_stop(
+                            child.child.as_raw_handle() as HANDLE,
+                            pid,
+                            service,
+                        );
                     }
                 } else {
-                    unsafe { TerminateProcess(child.child.as_raw_handle() as HANDLE, 0) };
+                    terminate_process_for_stop(child.child.as_raw_handle() as HANDLE, pid, service);
                 }
             }
         }
@@ -4996,6 +5444,29 @@ struct ServiceConfig {
     kill_process_tree: bool,
 }
 
+fn compose_service_environment(
+    service: &str,
+    application: &str,
+    inherited: &[String],
+    replacement: Option<&[String]>,
+    extra: &[String],
+) -> Result<Vec<String>, nssm_rs::ParseError> {
+    let base = compose_child_environment(inherited, replacement, &[]).inspect_err(|_| {
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_CREATEPROCESS_FAILED_INVALID_ENVIRONMENT,
+            &[service, application, "AppEnvironment"],
+        );
+    })?;
+    compose_child_environment(&base, None, extra).inspect_err(|_| {
+        report_event(
+            EVENTLOG_ERROR_TYPE,
+            EVENT_CREATEPROCESS_FAILED_INVALID_ENVIRONMENT,
+            &[service, application, "AppEnvironmentExtra"],
+        );
+    })
+}
+
 unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::PWSTR) {
     if argc == 0 || argv.is_null() {
         return;
@@ -5051,16 +5522,19 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         let inherited: Vec<String> = std::env::vars_os()
             .map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy()))
             .collect();
+        let raw_app = read_reg_string(&service_name, "Application")?;
         let app_environment = read_multi_parameter(&service_name, "AppEnvironment")?;
         let extra_environment =
             read_multi_parameter(&service_name, "AppEnvironmentExtra")?.unwrap_or_default();
-        let child_environment =
-            compose_child_environment(&inherited, app_environment.as_deref(), &extra_environment)
-                .map_err(|error| error.to_string())?;
-        let app = expand_environment_value(
-            &read_reg_string(&service_name, "Application")?,
-            &child_environment,
-        );
+        let child_environment = compose_service_environment(
+            &service_name,
+            &raw_app,
+            &inherited,
+            app_environment.as_deref(),
+            &extra_environment,
+        )
+        .map_err(|error| error.to_string())?;
+        let app = expand_environment_value(&raw_app, &child_environment);
         let args = match read_optional_reg_string(&service_name, "AppParameters") {
             Ok(Some(value)) => {
                 split_windows_args(&expand_environment_value(&value, &child_environment))
@@ -5313,16 +5787,6 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 Ok(file) => file.map(Stdio::from).unwrap_or_else(Stdio::null),
                 Err(error) => {
                     report_stdio_setup_failure(&service_name, &app, &error);
-                    if application_started {
-                        retry_failed_restart_launch(
-                            &service_name,
-                            &app,
-                            throttle_ms,
-                            restart_delay_ms,
-                            &mut throttle,
-                        );
-                        continue;
-                    }
                     finish_async_hooks();
                     set_status_with_service_exit(
                         SERVICE_STOPPED,
@@ -5330,6 +5794,10 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                         4,
                         0,
                     );
+                    if application_started {
+                        wait_before_failed_restart_retry(&service_name, &app);
+                        continue;
+                    }
                     return;
                 }
             };
@@ -5338,16 +5806,6 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 Ok(file) => file,
                 Err(error) => {
                     report_stdio_setup_failure(&service_name, &app, &error);
-                    if application_started {
-                        retry_failed_restart_launch(
-                            &service_name,
-                            &app,
-                            throttle_ms,
-                            restart_delay_ms,
-                            &mut throttle,
-                        );
-                        continue;
-                    }
                     finish_async_hooks();
                     set_status_with_service_exit(
                         SERVICE_STOPPED,
@@ -5355,6 +5813,10 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                         4,
                         0,
                     );
+                    if application_started {
+                        wait_before_failed_restart_retry(&service_name, &app);
+                        continue;
+                    }
                     return;
                 }
             };
@@ -5369,16 +5831,6 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                             error,
                         };
                         report_stdio_setup_failure(&service_name, &app, &error);
-                        if application_started {
-                            retry_failed_restart_launch(
-                                &service_name,
-                                &app,
-                                throttle_ms,
-                                restart_delay_ms,
-                                &mut throttle,
-                            );
-                            continue;
-                        }
                         finish_async_hooks();
                         set_status_with_service_exit(
                             SERVICE_STOPPED,
@@ -5386,6 +5838,10 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                             4,
                             0,
                         );
+                        if application_started {
+                            wait_before_failed_restart_retry(&service_name, &app);
+                            continue;
+                        }
                         return;
                     }
                 },
@@ -5396,16 +5852,6 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 Ok(file) => file,
                 Err(error) => {
                     report_stdio_setup_failure(&service_name, &app, &error);
-                    if application_started {
-                        retry_failed_restart_launch(
-                            &service_name,
-                            &app,
-                            throttle_ms,
-                            restart_delay_ms,
-                            &mut throttle,
-                        );
-                        continue;
-                    }
                     finish_async_hooks();
                     set_status_with_service_exit(
                         SERVICE_STOPPED,
@@ -5413,6 +5859,10 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                         4,
                         0,
                     );
+                    if application_started {
+                        wait_before_failed_restart_retry(&service_name, &app);
+                        continue;
+                    }
                     return;
                 }
             }
@@ -5463,7 +5913,7 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         if STOP_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
-        let (stdout_destination, stderr_destination) = if (timestamp_log || rotate_online)
+        let (mut stdout_destination, mut stderr_destination) = if (timestamp_log || rotate_online)
             && same_output_path
         {
             match (stdout_path.as_deref(), stdout_file.take()) {
@@ -5515,24 +5965,56 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             };
             (stdout_destination, stderr_destination)
         };
+        let (redirected_stdout, mut stdout_pipe) = match configured_output_stdio(
+            &service_name,
+            &mut stdout_destination,
+            stdout_file.take(),
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                report_stdio_setup_failure(
+                    &service_name,
+                    &app,
+                    &StdioFileError::Create {
+                        path: stdout_path.as_deref().unwrap_or_default().to_owned(),
+                        error,
+                    },
+                );
+                set_status_with_service_exit(
+                    SERVICE_STOPPED,
+                    windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                    4,
+                    0,
+                );
+                return;
+            }
+        };
+        let (redirected_stderr, mut stderr_pipe) = match configured_output_stdio(
+            &service_name,
+            &mut stderr_destination,
+            stderr_file.take(),
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                report_stdio_setup_failure(
+                    &service_name,
+                    &app,
+                    &StdioFileError::Create {
+                        path: stderr_path.as_deref().unwrap_or_default().to_owned(),
+                        error,
+                    },
+                );
+                set_status_with_service_exit(
+                    SERVICE_STOPPED,
+                    windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                    4,
+                    0,
+                );
+                return;
+            }
+        };
         let timestamp_stdout = timestamp_log && stdout_destination.is_some();
         let timestamp_stderr = timestamp_log && stderr_destination.is_some();
-        let redirected_stdout = if stdout_destination.is_some() {
-            Stdio::piped()
-        } else {
-            stdout_file
-                .take()
-                .map(Stdio::from)
-                .unwrap_or_else(Stdio::null)
-        };
-        let redirected_stderr = if stderr_destination.is_some() {
-            Stdio::piped()
-        } else {
-            stderr_file
-                .take()
-                .map(Stdio::from)
-                .unwrap_or_else(Stdio::null)
-        };
         let mut command = ProcessCommand::new(&app);
         command
             .args(&args)
@@ -5579,31 +6061,97 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 }
             }
         }
-        let mut process = match command.spawn() {
+        let mut logger_threads = Vec::new();
+        if let (Some(destination), Some(pipe)) = (stdout_destination.as_ref(), stdout_pipe.take()) {
+            let destination_for_thread = destination.clone();
+            match spawn_logger_thread("nssm-rs stdout logger", move || {
+                log_stream(pipe, destination_for_thread, timestamp_stdout)
+            }) {
+                Ok(logger) => logger_threads.push(logger),
+                Err(error) => {
+                    match fallback_after_logger_thread_failure(&mut stdout_destination, &error) {
+                        Ok(file) => {
+                            command.stdout(Stdio::from(file));
+                        }
+                        Err(error) => {
+                            report_stdio_setup_failure(
+                                &service_name,
+                                &app,
+                                &StdioFileError::Create {
+                                    path: stdout_path.as_deref().unwrap_or_default().to_owned(),
+                                    error,
+                                },
+                            );
+                            set_status_with_service_exit(
+                                SERVICE_STOPPED,
+                                windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                                4,
+                                0,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        if let (Some(destination), Some(pipe)) = (stderr_destination.as_ref(), stderr_pipe.take()) {
+            let destination_for_thread = destination.clone();
+            match spawn_logger_thread("nssm-rs stderr logger", move || {
+                log_stream(pipe, destination_for_thread, timestamp_stderr)
+            }) {
+                Ok(logger) => logger_threads.push(logger),
+                Err(error) => {
+                    match fallback_after_logger_thread_failure(&mut stderr_destination, &error) {
+                        Ok(file) => {
+                            command.stderr(Stdio::from(file));
+                        }
+                        Err(error) => {
+                            report_stdio_setup_failure(
+                                &service_name,
+                                &app,
+                                &StdioFileError::Create {
+                                    path: stderr_path.as_deref().unwrap_or_default().to_owned(),
+                                    error,
+                                },
+                            );
+                            set_status_with_service_exit(
+                                SERVICE_STOPPED,
+                                windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
+                                4,
+                                0,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        let process = match command.spawn() {
             Ok(process) => process,
             Err(error) => {
-                match nssm_rs::launch_failure_disposition(
+                drop(command);
+                for logger in logger_threads.drain(..) {
+                    let _ = logger.join();
+                }
+                let disposition = nssm_rs::launch_failure_disposition(
                     application_started,
                     STOP_REQUESTED.load(Ordering::SeqCst),
-                ) {
+                );
+                match disposition {
                     LaunchFailureDisposition::StopRequested => break,
-                    LaunchFailureDisposition::Retry => {
-                        retry_failed_restart_launch(
-                            &service_name,
-                            &app,
-                            throttle_ms,
-                            restart_delay_ms,
-                            &mut throttle,
-                        );
-                        continue;
-                    }
-                    LaunchFailureDisposition::StopService => {}
+                    LaunchFailureDisposition::StopService
+                    | LaunchFailureDisposition::RetryAfterDelay => {}
                 }
-                let error = error.to_string();
+                let error = windows_error_message(&error);
                 report_event(
                     EVENTLOG_ERROR_TYPE,
                     EVENT_CREATEPROCESS_FAILED,
                     &[&service_name, &app, &error],
+                );
+                report_event(
+                    windows_sys::Win32::System::EventLog::EVENTLOG_INFORMATION_TYPE,
+                    EVENT_PROCESS_ALREADY_STOPPED,
+                    &[&service_name, &app],
                 );
                 report_event(
                     EVENTLOG_ERROR_TYPE,
@@ -5620,26 +6168,13 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                     SERVICE_LAUNCH_FAILURE_CODE,
                     0,
                 );
+                if disposition == LaunchFailureDisposition::RetryAfterDelay {
+                    wait_before_failed_restart_retry(&service_name, &app);
+                    continue;
+                }
                 return;
             }
         };
-        let mut logger_threads = Vec::new();
-        if let Some(destination) = stdout_destination.as_ref()
-            && let Some(pipe) = process.stdout.take()
-        {
-            let destination = destination.clone();
-            logger_threads.push(thread::spawn(move || {
-                log_stream(pipe, destination, timestamp_stdout)
-            }));
-        }
-        if let Some(destination) = stderr_destination.as_ref()
-            && let Some(pipe) = process.stderr.take()
-        {
-            let destination = destination.clone();
-            logger_threads.push(thread::spawn(move || {
-                log_stream(pipe, destination, timestamp_stderr)
-            }));
-        }
         let mut launched = match assign_to_job(process, kill_process_tree) {
             Ok(launched) => launched,
             Err(_) => {
@@ -5664,10 +6199,10 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
             );
             return;
         }
-        application_started = true;
         if let Ok(mut child) = CHILD_PROCESS.lock() {
             *child = Some(launched);
         }
+        application_started = true;
         throttle.mark_started();
         HOOK_THROTTLE_COUNT.store(throttle.counter(), Ordering::SeqCst);
         HOOK_START_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -6050,105 +6585,23 @@ fn is_administrator() -> bool {
     unsafe { IsUserAnAdmin() != 0 }
 }
 
-fn elevation_arguments(command: &Command) -> Option<Vec<String>> {
+fn requires_administrator(command: &Command) -> Option<&'static str> {
     match command {
-        Command::Install {
-            service,
-            application,
-            args,
-        } => {
-            let mut arguments = vec!["install".to_owned(), service.clone()];
-            if let Some(application) = application {
-                arguments.push(application.clone());
-                arguments.extend(args.iter().cloned());
-            }
-            Some(arguments)
-        }
-        Command::Remove { service, confirm } => {
-            let mut arguments = vec!["remove".to_owned(), service.clone()];
-            if *confirm {
-                arguments.push("confirm".to_owned());
-            }
-            Some(arguments)
-        }
-        Command::Dump {
-            service,
-            new_name: None,
-        } => Some(vec!["dump".to_owned(), service.clone()]),
+        Command::Install { .. } => Some("install a service"),
+        Command::Remove { .. } => Some("remove a service"),
+        Command::Dump { new_name: None, .. } => Some("edit a service"),
         _ => None,
-    }
-}
-
-fn elevation_parameters(arguments: &[String]) -> String {
-    arguments
-        .iter()
-        .map(|argument| quote_windows_arg(argument))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn elevate(arguments: &[String], command: &Command) -> u8 {
-    match command {
-        Command::Install { .. } => {
-            cli_eprintln!("Administrator access is needed to install a service.\r\r");
-        }
-        Command::Remove { .. } => {
-            cli_eprintln!("Administrator access is needed to remove a service.\r\r");
-        }
-        Command::Dump { .. } => {
-            cli_eprintln!("Administrator access is needed to edit a service.\r\r");
-        }
-        _ => {}
-    }
-    let executable = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(error) => {
-            cli_eprintln!("nssm-rs: unable to locate executable for elevation: {error}");
-            return 100;
-        }
-    };
-    let executable = wide(executable.as_os_str());
-    let verb = wide(OsStr::new("runas"));
-    let parameters = elevation_parameters(arguments);
-    let parameters = wide(OsStr::new(&parameters));
-    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
-    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.fMask = windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
-    info.lpVerb = verb.as_ptr();
-    info.lpFile = executable.as_ptr();
-    info.lpParameters = parameters.as_ptr();
-    info.nShow = SW_SHOW;
-    if unsafe { ShellExecuteExW(&mut info) } == 0 {
-        cli_eprintln!("nssm-rs: Windows refused the administrator elevation request");
-        100
-    } else {
-        if info.hProcess.is_null() {
-            cli_eprintln!("nssm-rs: Windows did not return the elevated process handle");
-            return 100;
-        }
-        let wait_result = unsafe {
-            WaitForSingleObject(
-                info.hProcess,
-                windows_sys::Win32::System::Threading::INFINITE,
-            )
-        };
-        let mut exit_code = 1;
-        let got_exit_code = wait_result == WAIT_OBJECT_0
-            && unsafe { GetExitCodeProcess(info.hProcess, &mut exit_code) } != 0;
-        unsafe { CloseHandle(info.hProcess) };
-        if !got_exit_code {
-            cli_eprintln!("nssm-rs: unable to read the elevated command's exit status");
-            return 100;
-        }
-        u8::try_from(exit_code).unwrap_or(100)
     }
 }
 
 pub fn execute(command: Command) -> Result<u8, String> {
     if !is_administrator()
-        && let Some(arguments) = elevation_arguments(&command)
+        && let Some(operation) = requires_administrator(&command)
     {
-        return Ok(elevate(&arguments, &command));
+        cli_eprintln!(
+            "Administrator access is required to {operation}. Run this command from an elevated terminal.\r"
+        );
+        return Ok(100);
     }
     let service = match &command {
         Command::Start(service)
@@ -6424,28 +6877,47 @@ fn execute_service_command(command: Command) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, EVENT_GET_PROCESS_AFFINITY_MASK_FAILED, EVENT_OPENSCMANAGER_FAILED,
+        Command, ERROR_INVALID_LEVEL, EVENT_ATTACH_CONSOLE_FAILED, EVENT_FREE_CONSOLE_FAILED,
+        EVENT_GENERATE_CONSOLE_CTRL_EVENT_FAILED, EVENT_GET_PROCESS_AFFINITY_MASK_FAILED,
+        EVENT_INVALID_ENVIRONMENT_STRING_TYPE, EVENT_OPENKEY_FAILED, EVENT_OPENSCMANAGER_FAILED,
         EVENT_SERVICE_CONTROL_HANDLED, EVENT_SERVICE_CONTROL_NOT_HANDLED,
-        EVENT_SERVICE_CONTROL_UNKNOWN, EVENT_SET_PROCESS_AFFINITY_MASK_FAILED,
+        EVENT_SERVICE_CONTROL_UNKNOWN, EVENT_SET_CONSOLE_CTRL_HANDLER_FAILED,
+        EVENT_SET_PROCESS_AFFINITY_MASK_FAILED, EVENT_SETVALUE_FAILED, FAIL_NEXT_ATTACH_CONSOLE,
+        FAIL_NEXT_DELAYED_START_CONFIG, FAIL_NEXT_DESCRIPTION_CONFIG, FAIL_NEXT_FREE_CONSOLE,
+        FAIL_NEXT_GENERATE_CTRL_EVENT, FAIL_NEXT_LOG_PIPE, FAIL_NEXT_LOG_THREAD,
         FAIL_NEXT_PROCESS_ENUMERATION, FAIL_NEXT_PROCESS_SNAPSHOT, FAIL_NEXT_PROCESS_TIMES,
-        FAIL_NEXT_STDIO_DUPLICATE, FAIL_OPEN_PROCESS_PID, HOOK_LAST_APPLICATION_EXIT_CODE,
-        HookAbiContext, Ordering, PBT_APMPOWERSTATUSCHANGE, PBT_APMRESUMEAUTOMATIC,
-        PowerHookAction, PowerHookInvocation, SERVICE_ACCEPT_PAUSE_CONTINUE,
-        SERVICE_ACCEPT_POWEREVENT, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
-        SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTINUE_PENDING, SERVICE_CONTROL_PAUSE,
-        SERVICE_CONTROL_POWEREVENT, SERVICE_PAUSED, SERVICE_RUNNING, SERVICE_START_PENDING,
-        StdioFileError, application_start_pending_controls, configure_child_affinity,
-        dump_open_service_error, duplicate_stdio_file, elevation_arguments, elevation_parameters,
-        ensure_event_source, finish_async_hooks, hook_abi_environment, hook_deadline_ms,
-        hook_exit_code, hook_trigger, install, is_administrator, open_manager, parse_u32,
-        power_hook_action, power_hook_invocation, priority_name, priority_value,
-        process_belongs_to_service_lifetime, process_open_error_output, process_tree_from_root,
-        quote_dump_arg, remove, report_stdio_setup_failure, service_control_event, service_handler,
-        service_main, service_type_name, set_is_reset_to_default, set_setting,
-        status_controls_accepted, valid_hook, valid_priority_class, wide,
+        FAIL_NEXT_SET_CONSOLE_HANDLER, FAIL_NEXT_STDIO_DUPLICATE, FAIL_NEXT_TERMINATE_PROCESS,
+        FAIL_NEXT_THREAD_FIRST, FAIL_NEXT_THREAD_NEXT, FAIL_NEXT_THREAD_SNAPSHOT,
+        FAIL_OPEN_PROCESS_PID, GetCurrentProcess, HOOK_LAST_APPLICATION_EXIT_CODE, HookAbiContext,
+        LogDestination, MOCK_CONSOLE_API, Ordering, PBT_APMPOWERSTATUSCHANGE,
+        PBT_APMRESUMEAUTOMATIC, PowerHookAction, PowerHookInvocation,
+        SERVICE_ACCEPT_PAUSE_CONTINUE, SERVICE_ACCEPT_POWEREVENT, SERVICE_ACCEPT_SHUTDOWN,
+        SERVICE_ACCEPT_STOP, SERVICE_CHILD_ENVIRONMENT, SERVICE_CONTINUE_PENDING,
+        SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT, SERVICE_PAUSED, SERVICE_RUNNING,
+        SERVICE_START_PENDING, StdioFileError, application_start_pending_controls,
+        compose_service_environment, configure_child_affinity, configure_delayed_start,
+        configured_output_stdio, create_log_pipe, decode_multi_parameter, dump_open_service_error,
+        duplicate_stdio_file, ensure_event_source, fallback_after_logger_thread_failure,
+        finish_async_hooks, hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger,
+        install, is_administrator, open_manager, open_registry_key, parse_u32, power_hook_action,
+        power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
+        process_open_error_output, process_tree_from_root, quote_dump_arg, remove,
+        report_stdio_setup_failure, reportable_delayed_start_error, requires_administrator,
+        send_console_ctrl_c, send_thread_quit, service_control_event, service_handler,
+        service_main, service_type_name, set_is_reset_to_default, set_service_description,
+        set_setting, spawn_logger_thread, status_controls_accepted, terminate_process_for_stop,
+        valid_hook, valid_priority_class, wide, write_raw_value,
     };
+    use std::{fs::File, io::Read, os::windows::process::CommandExt};
 
     static WINDOWS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    fn hidden_powershell(powershell: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(powershell);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
 
     #[test]
     fn explicitly_set_empty_string_is_not_reported_as_reset() {
@@ -6496,7 +6968,7 @@ mod tests {
         let script = format!(
             "$event = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id={event_id}}} -MaxEvents 1 -ErrorAction SilentlyContinue | Select-Object -First 1; if ($event) {{ [Console]::Write($event.RecordId) }} else {{ [Console]::Write('0') }}"
         );
-        let output = std::process::Command::new(powershell)
+        let output = hidden_powershell(powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
             .expect("query the latest event record");
@@ -6505,6 +6977,43 @@ mod tests {
             .trim()
             .parse()
             .expect("PowerShell returns the prior event record number")
+    }
+
+    fn event_properties_after(powershell: &str, event_id: u32, after: u64) -> Vec<String> {
+        let script = format!(
+            "$event = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id={event_id}}} -MaxEvents 100 -ErrorAction SilentlyContinue | Where-Object {{ $_.RecordId -gt {after} }} | Select-Object -First 1; if ($event) {{ foreach ($property in $event.Properties) {{ [Console]::WriteLine([string]$property.Value) }} }} else {{ exit 1 }}"
+        );
+        let output = hidden_powershell(powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .expect("query event insertion values");
+        assert!(
+            output.status.success(),
+            "event {event_id} exists after {after}"
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn ensure_test_event_source(powershell: &str) {
+        if ensure_event_source().is_ok() {
+            return;
+        }
+        let output = hidden_powershell(powershell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[System.Diagnostics.EventLog]::SourceExists('nssm')",
+            ])
+            .output()
+            .expect("query an existing event source");
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "True",
+            "test runner must be able to register the event source or reuse an existing one"
+        );
     }
 
     #[test]
@@ -6528,9 +7037,9 @@ mod tests {
     fn affinity_api_failures_report_reference_events_1069_and_1070() {
         let _test_lock = WINDOWS_TEST_LOCK
             .lock()
-            .expect("Windows event tests are serialized");
-        ensure_event_source().expect("test runner can register the NSSM event source");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
         let get_event = EVENT_GET_PROCESS_AFFINITY_MASK_FAILED & 0xffff;
         let set_event = EVENT_SET_PROCESS_AFFINITY_MASK_FAILED & 0xffff;
         let get_before = latest_event_record(&powershell, get_event);
@@ -6549,7 +7058,7 @@ mod tests {
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
-            if std::process::Command::new(powershell)
+            if hidden_powershell(powershell)
                 .args(["-NoProfile", "-NonInteractive", "-Command", &script])
                 .status()
                 .is_ok_and(|status| status.success())
@@ -6664,40 +7173,248 @@ mod tests {
     }
 
     #[test]
-    fn elevation_rebuilds_install_remove_and_dump_arguments_safely() {
+    fn administrator_required_operations_are_reported_without_elevation() {
         let install = Command::Install {
             service: "worker service".into(),
             application: Some(r"C:\Program Files\worker.exe".into()),
             args: vec!["--label".into(), "two words".into()],
         };
-        let install_arguments = elevation_arguments(&install).expect("install requests elevation");
-        assert_eq!(
-            elevation_parameters(&install_arguments),
-            r#"install "worker service" "C:\Program Files\worker.exe" --label "two words""#
-        );
+        assert_eq!(requires_administrator(&install), Some("install a service"));
 
         let remove = Command::Remove {
             service: "worker service".into(),
             confirm: true,
         };
-        let remove_arguments = elevation_arguments(&remove).expect("remove requests elevation");
-        assert_eq!(remove_arguments, ["remove", "worker service", "confirm"]);
+        assert_eq!(requires_administrator(&remove), Some("remove a service"));
 
         let dump = Command::Dump {
             service: "Task Scheduler".into(),
             new_name: None,
         };
-        let dump_arguments = elevation_arguments(&dump).expect("single-service dump elevates");
-        assert_eq!(dump_arguments, ["dump", "Task Scheduler"]);
-        assert!(
-            elevation_arguments(&Command::Dump {
+        assert_eq!(requires_administrator(&dump), Some("edit a service"));
+        assert_eq!(
+            requires_administrator(&Command::Dump {
                 service: "Task Scheduler".into(),
                 new_name: Some("copy".into()),
-            })
-            .is_none()
+            }),
+            None
+        );
+        assert_eq!(requires_administrator(&Command::List { all: false }), None);
+    }
+
+    #[test]
+    fn terminate_process_failure_reports_event_1028_without_terminating_test_process() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let previous_record = latest_event_record(&powershell, 1028);
+        let service = format!("NssmRsTerminateFailure{}", std::process::id());
+        FAIL_NEXT_TERMINATE_PROCESS.store(true, Ordering::SeqCst);
+        assert!(!terminate_process_for_stop(
+            unsafe { GetCurrentProcess() },
+            std::process::id(),
+            &service,
+        ));
+        wait_for_event(&powershell, 1028, previous_record, &service);
+    }
+
+    #[test]
+    fn thread_shutdown_enumeration_failures_report_events_1032_and_1033() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let service = format!("NssmRsThreadEnumeration{}", std::process::id());
+
+        let snapshot_before = latest_event_record(&powershell, 1032);
+        FAIL_NEXT_THREAD_SNAPSHOT.store(true, Ordering::SeqCst);
+        send_thread_quit(&service, 0);
+        wait_for_event(&powershell, 1032, snapshot_before, &service);
+
+        let first_before = latest_event_record(&powershell, 1033);
+        FAIL_NEXT_THREAD_FIRST.store(true, Ordering::SeqCst);
+        send_thread_quit(&service, 0);
+        wait_for_event(&powershell, 1033, first_before, &service);
+
+        let next_before = latest_event_record(&powershell, 1033);
+        FAIL_NEXT_THREAD_NEXT.store(true, Ordering::SeqCst);
+        send_thread_quit(&service, 0);
+        wait_for_event(&powershell, 1033, next_before, &service);
+    }
+
+    #[test]
+    fn registry_value_write_failure_reports_event_1019() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let value = format!("NssmRsWriteFailure{}", std::process::id());
+        let before = latest_event_record(&powershell, EVENT_SETVALUE_FAILED & 0xffff);
+
+        let result = write_raw_value(std::ptr::null_mut(), Some(&value), 1, &[]);
+
+        assert!(
+            result.is_err(),
+            "writing through an invalid registry key fails"
+        );
+        wait_for_event(&powershell, EVENT_SETVALUE_FAILED & 0xffff, before, &value);
+    }
+
+    #[test]
+    fn required_registry_key_open_failure_reports_event_1017() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let service = format!("NssmRsMissingRegistryKey{}", std::process::id());
+        let before = latest_event_record(&powershell, EVENT_OPENKEY_FAILED & 0xffff);
+
+        let result = open_registry_key(
+            &service,
+            "",
+            false,
+            windows_sys::Win32::System::Registry::KEY_QUERY_VALUE,
         );
 
-        assert!(elevation_arguments(&Command::List { all: false }).is_none());
+        assert!(
+            result.is_err(),
+            "a missing required service key cannot be opened"
+        );
+        wait_for_event(&powershell, EVENT_OPENKEY_FAILED & 0xffff, before, &service);
+    }
+
+    #[test]
+    fn invalid_environment_registry_type_warns_and_ignores_the_value() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let service = format!("NssmRsInvalidEnvironmentType{}", std::process::id());
+        let before =
+            latest_event_record(&powershell, EVENT_INVALID_ENVIRONMENT_STRING_TYPE & 0xffff);
+        let bytes: Vec<u8> = "NAME=value\0\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+
+        let result = decode_multi_parameter(&service, "AppEnvironment", 1, &bytes);
+
+        assert_eq!(result.expect("invalid type is handled as a warning"), None);
+        wait_for_event(
+            &powershell,
+            EVENT_INVALID_ENVIRONMENT_STRING_TYPE & 0xffff,
+            before,
+            &service,
+        );
+    }
+
+    #[test]
+    fn malformed_extra_environment_reports_event_1038_and_rejects_start_config() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let service = format!("NssmRsMalformedEnvironment{}", std::process::id());
+        let before = latest_event_record(&powershell, 1038);
+        let application = r"C:\Apps\worker.exe";
+        let inherited = vec![r"PATH=C:\Windows".to_owned()];
+        let replacement = vec!["BASE=value".to_owned()];
+        let extra = vec!["BROKEN".to_owned()];
+
+        let error = compose_service_environment(
+            &service,
+            application,
+            &inherited,
+            Some(&replacement),
+            &extra,
+        )
+        .expect_err("malformed environment prevents child startup");
+        assert_eq!(
+            error.to_string(),
+            "environment entry must use KEY=VALUE: BROKEN"
+        );
+        wait_for_event(&powershell, 1038, before, &service);
+        let event_fields = format!(
+            "$event = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=1038}} -MaxEvents 100 -ErrorAction SilentlyContinue | Where-Object {{ $_.RecordId -gt {before} }} | Select-Object -First 1; if ($event) {{ $p = $event.Properties; if ($p.Count -eq 3 -and $p[0].Value -eq '{service}' -and $p[1].Value -eq '{application}' -and $p[2].Value -eq 'AppEnvironmentExtra') {{ exit 0 }} }}; exit 1"
+        );
+        let verified = hidden_powershell(&powershell)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &event_fields])
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(
+            verified,
+            "event 1038 includes service, application and value name"
+        );
+    }
+
+    #[test]
+    fn console_shutdown_api_failures_report_events_1045_through_1048() {
+        struct ResetConsoleMock;
+        impl Drop for ResetConsoleMock {
+            fn drop(&mut self) {
+                MOCK_CONSOLE_API.store(false, Ordering::SeqCst);
+            }
+        }
+
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let service = format!("NssmRsConsoleFailure{}", std::process::id());
+        MOCK_CONSOLE_API.store(true, Ordering::SeqCst);
+        let _reset_mock = ResetConsoleMock;
+
+        let before = latest_event_record(&powershell, EVENT_ATTACH_CONSOLE_FAILED & 0xffff);
+        FAIL_NEXT_ATTACH_CONSOLE.store(true, Ordering::SeqCst);
+        send_console_ctrl_c(&service, 1);
+        wait_for_event(
+            &powershell,
+            EVENT_ATTACH_CONSOLE_FAILED & 0xffff,
+            before,
+            &service,
+        );
+
+        let before =
+            latest_event_record(&powershell, EVENT_SET_CONSOLE_CTRL_HANDLER_FAILED & 0xffff);
+        FAIL_NEXT_SET_CONSOLE_HANDLER.store(true, Ordering::SeqCst);
+        send_console_ctrl_c(&service, 1);
+        wait_for_event(
+            &powershell,
+            EVENT_SET_CONSOLE_CTRL_HANDLER_FAILED & 0xffff,
+            before,
+            &service,
+        );
+
+        let before = latest_event_record(
+            &powershell,
+            EVENT_GENERATE_CONSOLE_CTRL_EVENT_FAILED & 0xffff,
+        );
+        FAIL_NEXT_GENERATE_CTRL_EVENT.store(true, Ordering::SeqCst);
+        send_console_ctrl_c(&service, 1);
+        wait_for_event(
+            &powershell,
+            EVENT_GENERATE_CONSOLE_CTRL_EVENT_FAILED & 0xffff,
+            before,
+            &service,
+        );
+
+        let before = latest_event_record(&powershell, EVENT_FREE_CONSOLE_FAILED & 0xffff);
+        FAIL_NEXT_FREE_CONSOLE.store(true, Ordering::SeqCst);
+        send_console_ctrl_c(&service, 1);
+        wait_for_event(
+            &powershell,
+            EVENT_FREE_CONSOLE_FAILED & 0xffff,
+            before,
+            &service,
+        );
     }
 
     #[test]
@@ -6748,8 +7465,10 @@ mod tests {
     fn service_main_reports_event_1005_when_handler_registration_fails() {
         let _test_lock = WINDOWS_TEST_LOCK
             .lock()
-            .expect("Windows event tests are serialized");
-        ensure_event_source().expect("test runner can register the NSSM event source");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+        ensure_test_event_source(&powershell);
         let service_name = format!(
             "NssmRsHandlerFailure{}{}",
             std::process::id(),
@@ -6760,10 +7479,8 @@ mod tests {
         );
         let name = wide(std::ffi::OsStr::new(&service_name));
         let mut name_pointer = name.as_ptr() as *mut u16;
-        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-        let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
         let latest_event = "$event = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='nssm'; Id=1005} -MaxEvents 1 -ErrorAction SilentlyContinue | Select-Object -First 1; if ($event) { [Console]::Write($event.RecordId) } else { [Console]::Write('0') }";
-        let previous_record = std::process::Command::new(&powershell)
+        let previous_record = hidden_powershell(&powershell)
             .args(["-NoProfile", "-NonInteractive", "-Command", latest_event])
             .output()
             .expect("query the latest event record");
@@ -6780,7 +7497,7 @@ mod tests {
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
-            if std::process::Command::new(&powershell)
+            if hidden_powershell(&powershell)
                 .args(["-NoProfile", "-NonInteractive", "-Command", &script])
                 .status()
                 .is_ok_and(|status| status.success())
@@ -6796,11 +7513,11 @@ mod tests {
     fn process_snapshot_failure_reports_event_1024_and_returns_the_windows_error() {
         let _test_lock = WINDOWS_TEST_LOCK
             .lock()
-            .expect("Windows event tests are serialized");
-        ensure_event_source().expect("test runner can register the NSSM event source");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
         let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-        let before = std::process::Command::new(&powershell)
+        ensure_test_event_source(&powershell);
+        let before = hidden_powershell(&powershell)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -6825,7 +7542,7 @@ mod tests {
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
-            if std::process::Command::new(&powershell)
+            if hidden_powershell(&powershell)
                 .args(["-NoProfile", "-NonInteractive", "-Command", &query])
                 .status()
                 .is_ok_and(|status| status.success())
@@ -6841,11 +7558,11 @@ mod tests {
     fn process_enumeration_failure_reports_event_1025() {
         let _test_lock = WINDOWS_TEST_LOCK
             .lock()
-            .expect("Windows event tests are serialized");
-        ensure_event_source().expect("test runner can register the NSSM event source");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
         let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-        let before = std::process::Command::new(&powershell)
+        ensure_test_event_source(&powershell);
+        let before = hidden_powershell(&powershell)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -6869,7 +7586,7 @@ mod tests {
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
-            if std::process::Command::new(&powershell)
+            if hidden_powershell(&powershell)
                 .args(["-NoProfile", "-NonInteractive", "-Command", &query])
                 .status()
                 .is_ok_and(|status| status.success())
@@ -6885,11 +7602,11 @@ mod tests {
     fn process_image_open_failure_reports_event_1026_for_a_descendant() {
         let _test_lock = WINDOWS_TEST_LOCK
             .lock()
-            .expect("Windows event tests are serialized");
-        ensure_event_source().expect("test runner can register the NSSM event source");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
         let before = latest_event_record(&powershell, 1026);
-        let mut child = std::process::Command::new(&powershell)
+        let mut child = hidden_powershell(&powershell)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -6911,9 +7628,9 @@ mod tests {
     fn process_times_failure_reports_event_1044() {
         let _test_lock = WINDOWS_TEST_LOCK
             .lock()
-            .expect("Windows event tests are serialized");
-        ensure_event_source().expect("test runner can register the NSSM event source");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
         let before = latest_event_record(&powershell, 1044);
         FAIL_NEXT_PROCESS_TIMES.store(true, Ordering::SeqCst);
 
@@ -6926,9 +7643,9 @@ mod tests {
     fn duplicate_stdio_handle_failure_reports_event_1050() {
         let _test_lock = WINDOWS_TEST_LOCK
             .lock()
-            .expect("Windows event tests are serialized");
-        ensure_event_source().expect("test runner can register the NSSM event source");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
         let before = latest_event_record(&powershell, 1050);
         let directory = TestDirectory::new();
         let file = std::fs::File::create(directory.0.join("shared-output.log"))
@@ -6951,7 +7668,7 @@ mod tests {
     fn power_callback_launches_resume_hook_with_the_nssm_environment() {
         let _test_lock = WINDOWS_TEST_LOCK
             .lock()
-            .expect("Windows event tests are serialized");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let service = format!(
             "NssmRsPowerCallback{}{}",
             std::process::id(),
@@ -7165,6 +7882,193 @@ mod tests {
             "SERVICE_WIN32_SHARE_PROCESS|SERVICE_INTERACTIVE_PROCESS"
         );
         assert_eq!(service_type_name(0xffff), "?");
+    }
+
+    #[test]
+    fn delayed_start_configuration_failure_is_nonfatal_and_suppresses_unsupported_level() {
+        assert!(
+            reportable_delayed_start_error(std::io::Error::from_raw_os_error(
+                ERROR_INVALID_LEVEL as i32
+            ))
+            .is_none()
+        );
+        assert_eq!(
+            reportable_delayed_start_error(std::io::Error::from_raw_os_error(5))
+                .and_then(|error| error.raw_os_error()),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn delayed_start_configuration_failure_logs_event_1065() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let before = latest_event_record(&powershell, 1065);
+        let service = format!("NssmRsDelayedStartFailure{}", std::process::id());
+        FAIL_NEXT_DELAYED_START_CONFIG.store(true, Ordering::SeqCst);
+        assert!(configure_delayed_start(
+            &service,
+            std::ptr::null_mut(),
+            true
+        ));
+        wait_for_event(&powershell, 1065, before, &service);
+        let properties = event_properties_after(&powershell, 1065, before);
+        assert_eq!(properties.len(), 2);
+        assert_eq!(properties[0], service);
+        assert!(
+            !properties[1].is_empty(),
+            "event includes the Windows error"
+        );
+    }
+
+    #[test]
+    fn service_description_failure_logs_event_1064_and_returns_failure() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let before = latest_event_record(&powershell, 1064);
+        let service = format!("NssmRsDescriptionFailure{}", std::process::id());
+        FAIL_NEXT_DESCRIPTION_CONFIG.store(true, Ordering::SeqCst);
+        assert!(!set_service_description(
+            &service,
+            std::ptr::null_mut(),
+            "test description"
+        ));
+        wait_for_event(&powershell, 1064, before, &service);
+        let properties = event_properties_after(&powershell, 1064, before);
+        assert_eq!(properties.len(), 2);
+        assert_eq!(properties[0], service);
+        assert!(
+            !properties[1].is_empty(),
+            "event includes the Windows error"
+        );
+    }
+
+    #[test]
+    fn log_pipe_transfers_child_bytes_without_changing_them() {
+        let mut pipe = create_log_pipe().expect("Windows creates the anonymous log pipe");
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let command_prompt = format!("{windows}\\System32\\cmd.exe");
+        let child = std::process::Command::new(command_prompt)
+            .args(["/C", "echo", "child-pipe-marker"])
+            .current_dir(&windows)
+            .stdout(std::process::Stdio::from(pipe.writer))
+            .spawn()
+            .expect("child starts with the inheritable pipe writer");
+        assert!(child.wait_with_output().unwrap().status.success());
+        let mut captured = Vec::new();
+        pipe.reader
+            .read_to_end(&mut captured)
+            .expect("logger side reads all child output");
+        assert_eq!(captured, b"child-pipe-marker\r\n");
+    }
+
+    #[test]
+    fn log_pipe_creation_failure_reports_1073_and_falls_back_to_direct_file_output() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let before = latest_event_record(&powershell, 1073);
+        let service = format!("NssmRsPipeFailure{}", std::process::id());
+        let path = std::env::temp_dir().join(format!("{service}.log"));
+        let log_path = path.to_string_lossy().into_owned();
+        let file = File::create(&path).expect("create fallback log file");
+        let destination = std::sync::Arc::new(LogDestination {
+            service: service.clone(),
+            path: log_path.clone(),
+            sharing: 3,
+            disposition: std::sync::atomic::AtomicU32::new(4),
+            attributes: 128,
+            file: std::sync::Mutex::new(Some(file)),
+        });
+        let mut destination = Some(destination);
+        FAIL_NEXT_LOG_PIPE.store(true, Ordering::SeqCst);
+        let (stdout, reader) = configured_output_stdio(&service, &mut destination, None)
+            .expect("pipe failure falls back to the log file");
+        assert!(destination.is_none());
+        assert!(reader.is_none());
+
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let command_prompt = format!("{windows}\\System32\\cmd.exe");
+        let status = std::process::Command::new(command_prompt)
+            .args(["/C", "echo", "pipe-fallback-marker"])
+            .current_dir(&windows)
+            .stdout(stdout)
+            .status()
+            .expect("child process runs with direct file output");
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("child output was written directly"),
+            "pipe-fallback-marker\r\n"
+        );
+        wait_for_event(&powershell, 1073, before, &service);
+        let properties = event_properties_after(&powershell, 1073, before);
+        assert_eq!(properties.len(), 3);
+        assert_eq!(properties[0], service);
+        assert_eq!(properties[1], log_path);
+        assert!(
+            !properties[2].is_empty(),
+            "event includes the Windows error"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn logger_thread_creation_failure_reports_1060_and_preserves_direct_file_output() {
+        let _test_lock = WINDOWS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let powershell = powershell_path();
+        ensure_test_event_source(&powershell);
+        let before = latest_event_record(&powershell, 1060);
+        let service = format!("NssmRsLoggerThreadFailure{}", std::process::id());
+        let path = std::env::temp_dir().join(format!("{service}.log"));
+        let log_path = path.to_string_lossy().into_owned();
+        let file = File::create(&path).expect("create fallback log file");
+        let destination = std::sync::Arc::new(LogDestination {
+            service: service.clone(),
+            path: log_path,
+            sharing: 3,
+            disposition: std::sync::atomic::AtomicU32::new(4),
+            attributes: 128,
+            file: std::sync::Mutex::new(Some(file)),
+        });
+        let mut destination = Some(destination);
+        FAIL_NEXT_LOG_THREAD.store(true, Ordering::SeqCst);
+        let error = spawn_logger_thread("injected logger failure", || Ok(()))
+            .expect_err("injected thread creation failure is returned");
+        let stdout = fallback_after_logger_thread_failure(&mut destination, &error)
+            .expect("logger failure returns the active log file");
+        assert!(destination.is_none());
+
+        let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let command_prompt = format!("{windows}\\System32\\cmd.exe");
+        let status = std::process::Command::new(command_prompt)
+            .args(["/C", "echo", "thread-fallback-marker"])
+            .current_dir(&windows)
+            .stdout(std::process::Stdio::from(stdout))
+            .status()
+            .expect("child process runs with direct file output");
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("child output was written directly"),
+            "thread-fallback-marker\r\n"
+        );
+        wait_for_event(&powershell, 1060, before, "");
+        let properties = event_properties_after(&powershell, 1060, before);
+        assert_eq!(properties.len(), 1);
+        assert!(
+            !properties[0].is_empty(),
+            "event includes the Windows error"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
