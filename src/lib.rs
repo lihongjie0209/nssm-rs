@@ -838,7 +838,7 @@ pub fn timestamp_stream_chunk(
         let line_feed = if char_width == 2 {
             character == [b'\n', 0]
         } else {
-            character == [b'\n']
+            character == *b"\n"
         };
         if line_feed {
             at_line_start = true;
