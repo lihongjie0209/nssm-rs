@@ -4210,14 +4210,9 @@ fn utc_timestamp_prefix() -> String {
 fn detect_log_stream_char_width(bytes: &[u8]) -> usize {
     let pairs = bytes.len() / 2;
     if pairs >= 4 {
-        let even_zeroes = bytes[..pairs * 2]
-            .chunks_exact(2)
-            .filter(|pair| pair[0] == 0)
-            .count();
-        let odd_zeroes = bytes[..pairs * 2]
-            .chunks_exact(2)
-            .filter(|pair| pair[1] == 0)
-            .count();
+        let (code_units, _) = bytes[..pairs * 2].as_chunks::<2>();
+        let even_zeroes = code_units.iter().filter(|pair| pair[0] == 0).count();
+        let odd_zeroes = code_units.iter().filter(|pair| pair[1] == 0).count();
         if odd_zeroes * 2 >= pairs && odd_zeroes > even_zeroes * 2 {
             return 2;
         }
