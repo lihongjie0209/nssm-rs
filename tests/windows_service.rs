@@ -3483,7 +3483,7 @@ fn failed_restart_launch_stops_service_then_retries_after_delay() {
     std::fs::copy(source, &application).expect("copy cmd.exe to disposable application path");
 
     let command = format!(
-        "if exist \"{first_launch_marker}\" (timeout /t 60 /nobreak >nul) else (echo first>\"{first_launch_marker}\" & exit /b 23)"
+        "if exist \"{first_launch_marker}\" (echo retry>>\"{first_launch_marker}\" & timeout /t 60 /nobreak >nul) else (echo first>\"{first_launch_marker}\" & exit /b 23)"
     );
     let installed = cli(&["install", &service, &application, "/c", &command]);
     assert!(
@@ -3558,9 +3558,20 @@ fn failed_restart_launch_stops_service_then_retries_after_delay() {
         thread::sleep(Duration::from_millis(100));
     }
     let final_status = cli(&["status", &service]);
+    let windows = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let powershell = format!("{windows}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    let events_script = format!(
+        "$events = Get-WinEvent -FilterHashtable @{{LogName='Application'; ProviderName='nssm'; Id=@(1006,1007,1008,1010,1012)}} -MaxEvents 100 -ErrorAction SilentlyContinue; foreach ($event in $events) {{ if ($event.Properties | Where-Object {{ [string]$_.Value -eq '{service}' }}) {{ $values = ($event.Properties | ForEach-Object {{ [string]$_.Value }}) -join '|'; Write-Output ('id=' + $event.Id + ' values=' + $values) }} }}"
+    );
+    let event_output = hidden_powershell(&powershell)
+        .args(["-NoProfile", "-NonInteractive", "-Command", &events_script])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_else(|error| format!("could not query event log: {error}"));
+    let launch_output = std::fs::read_to_string(&first_launch_marker).unwrap_or_default();
     assert!(
         restarted,
-        "NSSM retries the application after 30 seconds; status={} stderr={}",
+        "NSSM retries the application after 30 seconds; status={} stderr={} launches={launch_output:?} events={event_output}",
         String::from_utf8_lossy(&final_status.stdout).trim(),
         String::from_utf8_lossy(&final_status.stderr).trim()
     );
