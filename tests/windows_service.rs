@@ -2819,14 +2819,14 @@ fn timestamp_log_preserves_utf16_streams_and_writes_a_bom() {
     let output_path = std::env::temp_dir().join(format!("{service}_utf16.log"));
     let output_path = output_path.to_string_lossy().into_owned();
     let _files = FileCleanup(vec![output_path.clone()]);
-    let script = "$bytes = [Text.Encoding]::Unicode.GetBytes('wide-marker' + \"`r`n\"); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)";
+    let script = "JABiAHkAdABlAHMAIAA9ACAAWwBUAGUAeAB0AC4ARQBuAGMAbwBkAGkAbgBnAF0AOgA6AFUAbgBpAGMAbwBkAGUALgBHAGUAdABCAHkAdABlAHMAKAAnAHcAaQBkAGUALQBtAGEAcgBrAGUAcgAnACAAKwAgAFsAYwBoAGEAcgBdADEAMwAgACsAIABbAGMAaABhAHIAXQAxADAAKQA7ACAAWwBDAG8AbgBzAG8AbABlAF0AOgA6AE8AcABlAG4AUwB0AGEAbgBkAGEAcgBkAE8AdQB0AHAAdQB0ACgAKQAuAFcAcgBpAHQAZQAoACQAYgB5AHQAZQBzACwAIAAwACwAIAAkAGIAeQB0AGUAcwAuAEwAZQBuAGcAdABoACkA";
     let installed = cli(&[
         "install",
         &service,
         &powershell,
         "-NoProfile",
         "-NonInteractive",
-        "-Command",
+        "-EncodedCommand",
         script,
     ]);
     assert!(
@@ -3544,7 +3544,13 @@ fn failed_restart_launch_stops_service_then_retries_after_delay() {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    assert!(restarted, "NSSM retries the application after 30 seconds");
+    let final_status = cli(&["status", &service]);
+    assert!(
+        restarted,
+        "NSSM retries the application after 30 seconds; status={} stderr={}",
+        String::from_utf8_lossy(&final_status.stdout).trim(),
+        String::from_utf8_lossy(&final_status.stderr).trim()
+    );
     assert!(
         retry_delay_started.elapsed() >= Duration::from_secs(29),
         "restart retry must wait approximately 30 seconds"
