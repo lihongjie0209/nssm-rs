@@ -6126,10 +6126,14 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
                 }
             }
         }
-        let process = match command.spawn() {
+        let process_result = command.spawn();
+        // Close the service host's copies of redirected pipe writers. Keeping
+        // `Command` alive retains those handles and prevents logger readers
+        // from seeing EOF after the child exits.
+        drop(command);
+        let process = match process_result {
             Ok(process) => process,
             Err(error) => {
-                drop(command);
                 for logger in logger_threads.drain(..) {
                     let _ = logger.join();
                 }
