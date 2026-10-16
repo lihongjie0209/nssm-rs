@@ -5535,6 +5535,18 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
         enable_recovery_for_non_crash_failures(service.0, &service_name);
     }
     set_status(SERVICE_START_PENDING, 0, 10_000);
+    let worker_name = service_name.clone();
+    if let Err(error) = thread::Builder::new()
+        .name("nssm-rs service worker".to_owned())
+        .spawn(move || service_worker(worker_name))
+    {
+        let error = windows_error_message(&error);
+        report_event(EVENTLOG_ERROR_TYPE, EVENT_CREATETHREAD_FAILED, &[&error]);
+        set_status(SERVICE_STOPPED, 2, 0);
+    }
+}
+
+fn service_worker(service_name: String) {
     let _ = ensure_default_exit_action(&service_name);
     let config = (|| -> Result<ServiceConfig, String> {
         let inherited: Vec<String> = std::env::vars_os()
