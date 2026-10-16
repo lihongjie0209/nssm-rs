@@ -20,7 +20,7 @@ use std::{
     process::{Child, Command as ProcessCommand, Stdio},
     ptr,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
     },
     thread,
@@ -258,6 +258,7 @@ macro_rules! cli_eprintln {
 }
 
 static SERVICE_STATUS_HANDLE_VALUE: AtomicIsize = AtomicIsize::new(0);
+static SERVICE_NAME_CONTEXT: OnceLock<Box<[u16]>> = OnceLock::new();
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static STOP_WAIT_CHECKPOINT: AtomicU32 = AtomicU32::new(0);
 static STOP_WAIT_HINT: AtomicU32 = AtomicU32::new(10_000);
@@ -5505,13 +5506,11 @@ unsafe extern "system" fn service_main(argc: u32, argv: *mut windows_sys::core::
     HOOK_APPLICATION_START_MS.store(0, Ordering::SeqCst);
     HOOK_APPLICATION_RUNTIME_MS.store(0, Ordering::SeqCst);
     HOOK_LAST_APPLICATION_EXIT_CODE.store(0, Ordering::SeqCst);
-    let name_wide = wide(OsStr::new(&service_name));
+    let name_context =
+        SERVICE_NAME_CONTEXT.get_or_init(|| wide(OsStr::new(&service_name)).into_boxed_slice());
+    let name_ptr = name_context.as_ptr();
     let handle = unsafe {
-        RegisterServiceCtrlHandlerExW(
-            name_wide.as_ptr(),
-            Some(service_handler),
-            name_wide.as_ptr().cast_mut().cast(),
-        )
+        RegisterServiceCtrlHandlerExW(name_ptr, Some(service_handler), name_ptr.cast_mut().cast())
     };
     if handle.is_null() {
         let error_message = windows_error_message(&io::Error::last_os_error());
