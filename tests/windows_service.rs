@@ -3471,12 +3471,21 @@ fn failed_restart_launch_stops_service_then_retries_after_delay() {
     let source = format!("{windows}\\System32\\cmd.exe");
     let application = std::env::temp_dir().join(format!("{service}.exe"));
     let unavailable = std::env::temp_dir().join(format!("{service}.missing.exe"));
+    let first_launch_marker = std::env::temp_dir().join(format!("{service}.first-launch"));
     let application = application.to_string_lossy().into_owned();
     let unavailable = unavailable.to_string_lossy().into_owned();
-    let _files = FileCleanup(vec![application.clone(), unavailable.clone()]);
+    let first_launch_marker = first_launch_marker.to_string_lossy().into_owned();
+    let _files = FileCleanup(vec![
+        application.clone(),
+        unavailable.clone(),
+        first_launch_marker.clone(),
+    ]);
     std::fs::copy(source, &application).expect("copy cmd.exe to disposable application path");
 
-    let installed = cli(&["install", &service, &application, "/c", "exit 23"]);
+    let command = format!(
+        "if exist \"{first_launch_marker}\" (timeout /t 60 /nobreak >nul) else (echo first>\"{first_launch_marker}\" & exit /b 23)"
+    );
+    let installed = cli(&["install", &service, &application, "/c", &command]);
     assert!(
         installed.status.success(),
         "install failed: {}",
@@ -3514,6 +3523,10 @@ fn failed_restart_launch_stops_service_then_retries_after_delay() {
     assert!(
         restart_delay_observed,
         "first app exit entered restart delay"
+    );
+    assert!(
+        std::path::Path::new(&first_launch_marker).exists(),
+        "first child launch completed before the executable was made unavailable"
     );
     std::fs::rename(&application, &unavailable)
         .expect("make application unavailable during the configured restart delay");
