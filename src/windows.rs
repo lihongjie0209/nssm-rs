@@ -2685,6 +2685,10 @@ fn wait_for_restart_delay(
 }
 
 fn wait_before_failed_restart_retry(service_name: &str, app: &str) {
+    // Keep the SCM service session alive while the restart delay elapses.
+    // SERVICE_STOPPED is terminal for this dispatcher run on Windows, so a
+    // later SetServiceStatus(SERVICE_START_PENDING) cannot resume it.
+    set_status(SERVICE_START_PENDING, 0, 30_000);
     report_event(
         windows_sys::Win32::System::EventLog::EVENTLOG_WARNING_TYPE,
         EVENT_RESTART_SERVICE_FAILED,
@@ -5812,16 +5816,16 @@ fn service_worker(service_name: String) {
                 Err(error) => {
                     report_stdio_setup_failure(&service_name, &app, &error);
                     finish_async_hooks();
+                    if application_started {
+                        wait_before_failed_restart_retry(&service_name, &app);
+                        continue;
+                    }
                     set_status_with_service_exit(
                         SERVICE_STOPPED,
                         windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
                         4,
                         0,
                     );
-                    if application_started {
-                        wait_before_failed_restart_retry(&service_name, &app);
-                        continue;
-                    }
                     return;
                 }
             };
@@ -5831,16 +5835,16 @@ fn service_worker(service_name: String) {
                 Err(error) => {
                     report_stdio_setup_failure(&service_name, &app, &error);
                     finish_async_hooks();
+                    if application_started {
+                        wait_before_failed_restart_retry(&service_name, &app);
+                        continue;
+                    }
                     set_status_with_service_exit(
                         SERVICE_STOPPED,
                         windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
                         4,
                         0,
                     );
-                    if application_started {
-                        wait_before_failed_restart_retry(&service_name, &app);
-                        continue;
-                    }
                     return;
                 }
             };
@@ -5856,16 +5860,16 @@ fn service_worker(service_name: String) {
                         };
                         report_stdio_setup_failure(&service_name, &app, &error);
                         finish_async_hooks();
+                        if application_started {
+                            wait_before_failed_restart_retry(&service_name, &app);
+                            continue;
+                        }
                         set_status_with_service_exit(
                             SERVICE_STOPPED,
                             windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
                             4,
                             0,
                         );
-                        if application_started {
-                            wait_before_failed_restart_retry(&service_name, &app);
-                            continue;
-                        }
                         return;
                     }
                 },
@@ -5877,16 +5881,16 @@ fn service_worker(service_name: String) {
                 Err(error) => {
                     report_stdio_setup_failure(&service_name, &app, &error);
                     finish_async_hooks();
+                    if application_started {
+                        wait_before_failed_restart_retry(&service_name, &app);
+                        continue;
+                    }
                     set_status_with_service_exit(
                         SERVICE_STOPPED,
                         windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
                         4,
                         0,
                     );
-                    if application_started {
-                        wait_before_failed_restart_retry(&service_name, &app);
-                        continue;
-                    }
                     return;
                 }
             }
@@ -6190,16 +6194,16 @@ fn service_worker(service_name: String) {
                         &SERVICE_LAUNCH_FAILURE_CODE.to_string(),
                     ],
                 );
+                if disposition == LaunchFailureDisposition::RetryAfterDelay {
+                    wait_before_failed_restart_retry(&service_name, &app);
+                    continue;
+                }
                 set_status_with_service_exit(
                     SERVICE_STOPPED,
                     windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR,
                     SERVICE_LAUNCH_FAILURE_CODE,
                     0,
                 );
-                if disposition == LaunchFailureDisposition::RetryAfterDelay {
-                    wait_before_failed_restart_retry(&service_name, &app);
-                    continue;
-                }
                 return;
             }
         };

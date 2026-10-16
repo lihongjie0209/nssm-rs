@@ -3540,8 +3540,8 @@ fn failed_restart_launch_stops_service_then_retries_after_delay() {
     );
     let retry_delay_started = Instant::now();
     assert!(
-        wait_for_service_state(&service, "SERVICE_STOPPED"),
-        "SCM observes SERVICE_STOPPED while NSSM waits before retrying"
+        wait_for_service_state(&service, "SERVICE_START_PENDING"),
+        "SCM keeps the service active while NSSM waits before retrying"
     );
     std::fs::rename(&unavailable, &application)
         .expect("restore the application before NSSM's 30-second retry");
