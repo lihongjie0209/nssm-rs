@@ -4207,6 +4207,33 @@ fn utc_timestamp_prefix() -> String {
     )
 }
 
+fn detect_log_stream_char_width(bytes: &[u8]) -> usize {
+    let pairs = bytes.len() / 2;
+    if pairs >= 4 {
+        let even_zeroes = bytes[..pairs * 2]
+            .chunks_exact(2)
+            .filter(|pair| pair[0] == 0)
+            .count();
+        let odd_zeroes = bytes[..pairs * 2]
+            .chunks_exact(2)
+            .filter(|pair| pair[1] == 0)
+            .count();
+        if odd_zeroes * 2 >= pairs && odd_zeroes > even_zeroes * 2 {
+            return 2;
+        }
+    }
+
+    let mut result = 0;
+    let detected = unsafe {
+        IsTextUnicode(
+            bytes.as_ptr().cast(),
+            bytes.len().min(i32::MAX as usize) as i32,
+            &mut result,
+        ) != 0
+    };
+    if detected { 2 } else { 1 }
+}
+
 fn log_stream<R: Read>(
     mut input: R,
     destination: Arc<LogDestination>,
@@ -4231,17 +4258,8 @@ fn log_stream<R: Read>(
         if count == 0 {
             return destination.flush();
         }
-        let char_width = *char_width.get_or_insert_with(|| {
-            let mut result = 0;
-            let detected = unsafe {
-                IsTextUnicode(
-                    buffer.as_ptr().cast(),
-                    count.min(i32::MAX as usize) as i32,
-                    &mut result,
-                ) != 0
-            };
-            if detected { 2 } else { 1 }
-        });
+        let char_width =
+            *char_width.get_or_insert_with(|| detect_log_stream_char_width(&buffer[..count]));
         let chunk = if timestamp {
             let prefix = utc_timestamp_prefix();
             let (chunk, next_line_start) =
@@ -6900,10 +6918,11 @@ mod tests {
         SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_POWEREVENT, SERVICE_PAUSED, SERVICE_RUNNING,
         SERVICE_START_PENDING, StdioFileError, application_start_pending_controls,
         compose_service_environment, configure_child_affinity, configure_delayed_start,
-        configured_output_stdio, create_log_pipe, decode_multi_parameter, dump_open_service_error,
-        duplicate_stdio_file, ensure_event_source, fallback_after_logger_thread_failure,
-        finish_async_hooks, hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger,
-        install, is_administrator, open_manager, open_registry_key, parse_u32, power_hook_action,
+        configured_output_stdio, create_log_pipe, decode_multi_parameter,
+        detect_log_stream_char_width, dump_open_service_error, duplicate_stdio_file,
+        ensure_event_source, fallback_after_logger_thread_failure, finish_async_hooks,
+        hook_abi_environment, hook_deadline_ms, hook_exit_code, hook_trigger, install,
+        is_administrator, open_manager, open_registry_key, parse_u32, power_hook_action,
         power_hook_invocation, priority_name, priority_value, process_belongs_to_service_lifetime,
         process_open_error_output, process_tree_from_root, quote_dump_arg, remove,
         report_stdio_setup_failure, reportable_delayed_start_error, requires_administrator,
@@ -7951,6 +7970,16 @@ mod tests {
             !properties[1].is_empty(),
             "event includes the Windows error"
         );
+    }
+
+    #[test]
+    fn log_stream_detects_short_utf16le_ascii_without_a_bom() {
+        let utf16 = "wide-marker\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(detect_log_stream_char_width(&utf16), 2);
+        assert_eq!(detect_log_stream_char_width(b"ordinary text\r\n"), 1);
     }
 
     #[test]
