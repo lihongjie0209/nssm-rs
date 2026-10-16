@@ -2857,9 +2857,14 @@ fn timestamp_log_preserves_utf16_streams_and_writes_a_bom() {
         output.starts_with(&[0xff, 0xfe]),
         "missing UTF-16LE BOM: {output:?}"
     );
-    let code_units = output[2..]
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+    let (pairs, remainder) = output[2..].as_chunks::<2>();
+    assert!(
+        remainder.is_empty(),
+        "UTF-16LE output has an incomplete code unit"
+    );
+    let code_units = pairs
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect::<Vec<_>>();
     let output = String::from_utf16(&code_units).expect("timestamped output remains UTF-16");
     let (timestamp, _) = output
