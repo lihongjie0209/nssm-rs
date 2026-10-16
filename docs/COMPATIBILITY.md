@@ -300,11 +300,13 @@ well as lifecycle success-message text and line endings.
 When a child cannot be created after an application Restart action, upstream
 logs error event 1010 with the service, executable and OS error, then event
 1012 for the already-stopped process, event 1006 with service-specific exit
-code 3, and warning event 1007. It reports
-`SERVICE_STOPPED` during the 30-second wait, then tries the application again.
-nssm-rs now follows this behavior; its former retry-state expectation was
-incorrect. The paired Windows reference scenario checks all four events, the
-stopped interval, and successful recovery, and awaits a green run.
+code 3, and warning event 1007. It reports `SERVICE_STOPPED` during the
+30-second wait, then tries the application again. nssm-rs keeps the service in
+`SERVICE_START_PENDING` during that wait because Windows otherwise ends its
+SCM dispatcher before the retry can run. The Windows SCM scenario verifies
+the four events, retry delay, and child recovery in
+[CI run 38837051986](https://github.com/lihongjie0209/nssm-rs/actions/runs/38837051986).
+The intermediate service status is a known compatibility difference.
 Standard-stream creation failure now reports event 1049 with the file path and system error,
 then event 1051, already-stopped event 1012, and start failure 1006 with the
 output setup failure and service-specific exit code. Windows SCM tests check
