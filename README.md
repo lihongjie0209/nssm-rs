@@ -7,7 +7,7 @@
 
 ## Download
 
-The latest release is [v0.1.0](https://github.com/lihongjie0209/nssm-rs/releases/tag/v0.1.0). Download `nssm-rs-v0.1.0-windows-x64.zip` from the release page and extract `nssm-rs.exe`. A SHA-256 checksum file is provided alongside the archive.
+The latest release is [v0.1.1](https://github.com/lihongjie0209/nssm-rs/releases/tag/v0.1.1). Download `nssm-rs-v0.1.1-windows-x64.zip` from the release page and extract `nssm-rs.exe`. A SHA-256 checksum file is provided alongside the archive.
 
 ## Quick start
 

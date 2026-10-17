@@ -21,7 +21,7 @@ jobs:
         run: cargo test --lib --bins --test cli_compat --test cli_process
       - name: Run complete Windows service integration suite
         run: cargo test --test windows_scm_smoke --test windows_service -- --nocapture --test-threads=1
-      - run: cargo build --release
+      - run: cargo build --release --target x86_64-pc-windows-msvc
       - name: Package Windows x64 release
         shell: pwsh
         run: |
@@ -31,7 +31,7 @@ jobs:
           }
           $stage = Join-Path $env:RUNNER_TEMP 'nssm-rs-release'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item target/release/nssm-rs.exe $stage
+          Copy-Item target/x86_64-pc-windows-msvc/release/nssm-rs.exe $stage
           Copy-Item README.md, LICENSE, NOTICE $stage
           $archive = "nssm-rs-$tag-windows-x64.zip"
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive
